@@ -56,7 +56,7 @@ open ──claim──▶ claimed ──完成實作──▶ review ──另�
 ## 租約如何強制執行（v0.2）
 
 - 租約屬於**分支**，不是屬於某個 AI。不同 worktree/分支的 agent 互相隔離；在同一個 checkout 接手的 agent（接力模式）沿用原本的租約。
-- 租約檔用「原子建立」寫入，兩個 agent 同時認領同一個 id 時只有一個會成功。認領時若和其他分支的有效租約範圍重疊，會直接拒絕。
+- 租約檔先寫完整再原子發佈；認領時會先上鎖，「檢查重疊」和「建立租約」一次完成，同時認領重疊範圍的多個 agent 只有一個會成功。和其他分支的有效租約範圍重疊時直接拒絕，含 glob 的範圍採保守判斷。
 - Claude Code 的 `Edit`、`Write`、`MultiEdit`、`NotebookEdit` 和 Codex 的 `apply_patch` 在執行前都會先經過 hook 檢查。
 - hook 出錯時會放行（fail open），寧可少擋一次，也不讓 agent 卡死。
 
@@ -74,6 +74,6 @@ open ──claim──▶ claimed ──完成實作──▶ review ──另�
 
 - 用 shell 指令直接寫檔（例如 `echo > file`）不會被檢查。
 - 同一個 checkout 裡的多個 agent 共用租約；要互相隔離，就各開一個 worktree。
-- 兩個不同 id 的認領若在同一瞬間發生，範圍重疊檢查可能都通過，機率很低。
+- 一個 patch 同時改到被認領和沒被認領的檔案時，會整個被擋；把沒被認領的部分拆成另一個 patch 再送即可。
 - 看板 `.ai/board.md` 本身沒有鎖，兩個 agent 同時改仍可能互相覆蓋。
 - 時間以各機器的時鐘為準，沒有時鐘同步。

@@ -18,6 +18,7 @@ The hook fails open: if anything goes wrong it allows the edit rather than stall
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import fnmatch
 import json
@@ -25,6 +26,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 for stream in (sys.stdout, sys.stderr):
@@ -35,6 +37,8 @@ ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 TTL_RE = re.compile(r"^(\d+)([mhd])$")
 TTL_UNITS = {"m": 60, "h": 3600, "d": 86400}
 TIME_FMT = "%Y-%m-%dT%H:%M:%SZ"
+GLOB_CHARS = "*?["
+LOCK_WAIT, LOCK_STALE = 5.0, 30.0  # seconds
 EDIT_TOOLS = {"Edit", "Write", "NotebookEdit"}  # Claude Code file-edit tools; Codex edits arrive as patches
 PATCH_RE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+?)\s*$|^\*\*\* Move to: (.+?)\s*$", re.M)
 
@@ -140,10 +144,59 @@ def covers(pattern: str, rel: str) -> bool:
     return r == p or r.startswith(p + "/") or fnmatch.fnmatchcase(r, p)
 
 
+def literal_prefix(pattern: str) -> str:
+    cut = [i for i in (pattern.find(c) for c in GLOB_CHARS) if i >= 0]
+    return pattern[:min(cut)] if cut else pattern
+
+
 def overlaps(a: str, b: str) -> bool:
+    """Could two scope entries cover a common file? Conservative when globs are involved."""
     a, b = fold(a).rstrip("/"), fold(b).rstrip("/")
-    return (a == b or b.startswith(a + "/") or a.startswith(b + "/")
-            or fnmatch.fnmatchcase(b, a) or fnmatch.fnmatchcase(a, b))
+    if any(c in a + b for c in GLOB_CHARS):  # compare the literal parts before the first wildcard
+        pa, pb = literal_prefix(a), literal_prefix(b)
+        return pa.startswith(pb) or pb.startswith(pa)
+    return a == b or b.startswith(a + "/") or a.startswith(b + "/")
+
+
+def clean_scope(repo: Repo, items: list[str]) -> list[str]:
+    cleaned = []
+    for item in items:
+        path = Path(item)
+        if path.is_absolute():
+            rel = repo.rel(path)
+            if rel is None:
+                raise LeaseError(f"scope '{item}' is outside this repository ({repo.top})")
+            item = rel + ("/" if item.endswith("/") and not rel.endswith("/") else "")
+        if ".." in item.split("/"):
+            raise LeaseError(f"scope '{item}' must not contain '..'; use a path relative to the repo root")
+        cleaned.append(item)
+    return cleaned
+
+
+@contextlib.contextmanager
+def claim_lock(lease_dir: Path):
+    """Serialize claims so the overlap check and the create happen as one step."""
+    lease_dir.mkdir(parents=True, exist_ok=True)
+    lock = lease_dir / ".claim.lock"
+    deadline = time.monotonic() + LOCK_WAIT
+    while True:
+        try:
+            os.close(os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL))
+            break
+        except FileExistsError:
+            try:
+                if time.time() - lock.stat().st_mtime > LOCK_STALE:  # left behind by a crashed claim
+                    lock.unlink(missing_ok=True)
+                    continue
+            except FileNotFoundError:
+                continue
+            if time.monotonic() > deadline:
+                raise LeaseError("another claim is in progress; try again in a moment")
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        lock.unlink(missing_ok=True)
 
 
 def blocking(repo: Repo, rel: str) -> list[dict]:
@@ -153,14 +206,25 @@ def blocking(repo: Repo, rel: str) -> list[dict]:
 
 
 def write_new(path: Path, data: dict) -> bool:
+    """Publish a complete lease file only if none exists, so a reader never sees a half-written lease."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)  # atomic: only one claimant wins
+        os.link(tmp, path)  # atomic, and fails instead of overwriting
+        return True
     except FileExistsError:
         return False
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2)
-    return True
+    except OSError:  # file systems without hard links: fall back to an exclusive create
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        except FileExistsError:
+            return False
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+        return True
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def overwrite(path: Path, data: dict) -> None:
@@ -188,33 +252,35 @@ def cmd_claim(args) -> int:
     if not ID_RE.match(args.id):
         raise LeaseError(f"bad lease id '{args.id}': use letters, digits, . _ - (max 64)")
     repo = Repo(Path.cwd())
-    scope = norm_scope(args.scope)
+    scope = clean_scope(repo, norm_scope(args.scope))
     if not scope:
         raise LeaseError("--scope needs at least one path, directory/ or glob")
-    clashes = [(lease, a, b) for lease in repo.leases()
-               if live(lease) and lease.get("branch") != repo.branch and lease.get("id") != args.id
-               for a in scope for b in lease.get("scope", []) if overlaps(a, b)]
-    if clashes:
-        for lease, a, b in clashes:
-            print(f"conflict: '{a}' overlaps '{b}' in lease {describe(lease)}")
-        return 1
-    start = now()
-    data = {"id": args.id, "branch": repo.branch, "host": detect_host(args.host), "scope": scope,
-            "since": fmt(start), "until": fmt(start + parse_ttl(args.ttl)), "note": args.note or ""}
-    path = repo.path_of(args.id)
-    if write_new(path, data):
-        print(f"claimed {describe(data)}")
-        return 0
-    try:
-        existing = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        existing = {}
-    if existing.get("branch") not in (None, repo.branch):
-        if live(existing):
-            print(f"lease {args.id} is held: {describe(existing)}")
+    ttl = parse_ttl(args.ttl)
+    with claim_lock(repo.lease_dir):
+        clashes = [(lease, a, b) for lease in repo.leases()
+                   if live(lease) and lease.get("branch") != repo.branch and lease.get("id") != args.id
+                   for a in scope for b in lease.get("scope", []) if overlaps(a, b)]
+        if clashes:
+            for lease, a, b in clashes:
+                print(f"conflict: '{a}' overlaps '{b}' in lease {describe(lease)}")
             return 1
-        data["took_over_from"] = f"{existing.get('host', '?')}@{existing.get('branch')}"
-    overwrite(path, data)
+        start = now()
+        data = {"id": args.id, "branch": repo.branch, "host": detect_host(args.host), "scope": scope,
+                "since": fmt(start), "until": fmt(start + ttl), "note": args.note or ""}
+        path = repo.path_of(args.id)
+        if write_new(path, data):
+            print(f"claimed {describe(data)}")
+            return 0
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            existing = {}
+        if existing.get("branch") not in (None, repo.branch):
+            if live(existing):
+                print(f"lease {args.id} is held: {describe(existing)}")
+                return 1
+            data["took_over_from"] = f"{existing.get('host', '?')}@{existing.get('branch')}"
+        overwrite(path, data)
     print(f"{'took over' if 'took_over_from' in data else 'renewed'} {describe(data)}")
     return 0
 
@@ -284,12 +350,16 @@ def iter_strings(value):
 
 
 def edited_paths(payload: dict) -> list[str]:
-    """File paths a tool call would write: Claude edit tools, or files named in an apply_patch patch."""
+    """File paths a tool call would write: a Claude edit tool's target, or the files named in a patch.
+
+    Patch markers are read only when the call has no explicit target, so file content that merely
+    mentions `*** Update File:` is not mistaken for an edit of that file."""
     tool_input = payload.get("tool_input")
-    paths = [m.group(1) or m.group(2) for text in iter_strings(tool_input) for m in PATCH_RE.finditer(text)]
     if payload.get("tool_name") in EDIT_TOOLS and isinstance(tool_input, dict):
-        paths += [tool_input[k] for k in ("file_path", "notebook_path") if isinstance(tool_input.get(k), str)]
-    return paths
+        direct = [tool_input[k] for k in ("file_path", "notebook_path") if isinstance(tool_input.get(k), str)]
+        if direct:
+            return direct
+    return [m.group(1) or m.group(2) for text in iter_strings(tool_input) for m in PATCH_RE.finditer(text)]
 
 
 def cmd_hook(args) -> int:
@@ -315,7 +385,8 @@ def cmd_hook(args) -> int:
         return 0
     if problems:
         reason = ("Blocked by an agent lease: " + "; ".join(problems) + ". Another agent is working on these "
-                  "files. Work on other files, ask the user, or wait until the lease ends (see `lease.py list`).")
+                  "files. If this call also changes other files, send those in a separate edit. Otherwise work "
+                  "on other files, ask the user, or wait until the lease ends (see `lease.py list`).")
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                  "permissionDecisionReason": reason}}))
     log_path = os.environ.get("LEASE_HOOK_LOG")

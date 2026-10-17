@@ -19,12 +19,13 @@ A lease reserves repo paths for your branch for a limited time, and this plugin'
 
 ## While working
 - Still working when the lease is about to end: `python <skill-dir>/scripts/lease.py renew T4 --ttl 2h`
-- If an edit is blocked, tell the user who holds the lease and until when. Do not retry the edit or work around the hook with shell commands.
+- If an edit is blocked, tell the user who holds the lease and until when. Do not retry the leased file or work around the hook with shell commands.
 
 ## When done or pausing
 Run `python <skill-dir>/scripts/lease.py release T4`, then update `.ai/board.md` and `.ai/HANDOFF.md`.
 
 ## Limits
 - Leases belong to a branch. Agents sharing one checkout share its leases, so give each concurrent writer its own worktree.
-- The hook checks file-edit tools (Claude Code Edit, Write, MultiEdit, NotebookEdit; Codex apply_patch), not shell commands that write files.
+- The hook checks file-edit tools (Claude Code Edit, Write, NotebookEdit; Codex apply_patch, including patches applied through the shell), not shell commands such as `echo > file` that write files directly.
+- A patch that touches a leased file is blocked as a whole. Send edits to other files in a separate patch.
 - The hook fails open: if it hits an internal error, it allows the edit.

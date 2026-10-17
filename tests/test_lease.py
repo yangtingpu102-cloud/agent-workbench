@@ -136,6 +136,39 @@ class LeaseTest(RepoCase):
         self.assertEqual(self.run_lease(self.main, "release", "T1")[0], 0)
         self.assertIn("no leases", self.run_lease(self.main, "list")[1])
 
+    def test_write_content_mentioning_a_patch_is_not_misread(self):
+        self.claim_src_in_main()
+        payload = {"tool_name": "Write", "cwd": str(self.other),
+                   "tool_input": {"file_path": str(self.other / "README.md"), "content": PATCH}}
+        self.assertFalse(self.hook(self.other, payload)[0])
+
+    def test_shell_writes_are_not_checked(self):
+        """Documented boundary: only edit tools and patches are guarded, not shell redirection."""
+        self.claim_src_in_main()
+        payload = {"tool_name": "Bash", "cwd": str(self.other), "tool_input": {"command": "echo y > src/app.py"}}
+        self.assertFalse(self.hook(self.other, payload)[0])
+
+    def test_scope_rejects_parent_dirs_and_paths_outside_the_repo(self):
+        self.assertEqual(self.run_lease(self.main, "claim", "T5", "--scope", "../elsewhere/")[0], 1)
+        outside = str(Path(self.tmp.name) / "loose")
+        self.assertEqual(self.run_lease(self.main, "claim", "T6", "--scope", outside)[0], 1)
+        code, out = self.run_lease(self.main, "claim", "T7", "--scope", str(self.main / "src") + "/")
+        self.assertEqual(code, 0, out)
+        self.assertIn("[src/]", out)
+
+    def test_concurrent_overlapping_claims_only_one_wins(self):
+        trees = [self.main, self.other]
+        for i in range(2):
+            tree = Path(self.tmp.name) / f"extra{i}"
+            self.git(self.main, "worktree", "add", "-q", "-b", f"extra/{i}", str(tree))
+            trees.append(tree)
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "AGENT_HOST")}
+        procs = [subprocess.Popen([sys.executable, str(LEASE), "claim", f"C{i}", "--scope", "src/"], cwd=tree,
+                                  env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                 for i, tree in enumerate(trees)]
+        codes = [p.wait(timeout=60) for p in procs]
+        self.assertEqual(codes.count(0), 1, codes)
+
     def test_renew_only_by_owner(self):
         self.claim_src_in_main("--ttl", "5m")
         self.assertEqual(self.run_lease(self.other, "renew", "T1")[0], 1)
@@ -191,7 +224,10 @@ class MatchingTest(unittest.TestCase):
     def test_overlaps(self):
         self.assertTrue(lease.overlaps("src/", "src/app.py"))
         self.assertTrue(lease.overlaps("docs/*.md", "docs/a.md"))
+        self.assertTrue(lease.overlaps("src/*.py", "src/a*"))
+        self.assertTrue(lease.overlaps("*.md", "src/"))
         self.assertFalse(lease.overlaps("src/", "docs/"))
+        self.assertFalse(lease.overlaps("src/*.py", "docs/*.md"))
 
     @unittest.skipUnless(os.name == "nt", "Windows paths are case-insensitive")
     def test_case_insensitive_on_windows(self):

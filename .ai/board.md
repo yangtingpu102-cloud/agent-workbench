@@ -7,7 +7,7 @@ Times are UTC. Once a lease time has passed, anyone may take the task.
 |----|------|-------|--------|--------------------|-------------|------|
 | T2 | Try `handoff` and `cross-review` in real Claude Code and Codex sessions | - | open | plugins/workbench-core/skills/ | - | Claude → Codex passed on 2026-10-16; Codex → Claude still to do |
 | T3 | Write `claude plugin eval` cases for both skills | - | open | plugins/workbench-core/evals/ | - | needs Claude Code 2.1.269 or later |
-| T4 | Opportunity #6: lease enforcement hooks for Claude and Codex | - | review | plugins/workbench-lease/, docs/COLLAB-PROTOCOL.md, tests/ | - | branch feat/lease-hooks; needs Codex review and live tests (Codex quota resets 17:57 local; Claude CLI needs re-login) |
+| T4 | Opportunity #6: lease enforcement hooks for Claude and Codex | - | review | plugins/workbench-lease/, docs/COLLAB-PROTOCOL.md, tests/ | - | PR open; Codex reviewed and live-tested; Claude live test waits for CLI re-login |
 
 ## Done
 | id | task | owner | finished | evidence |
