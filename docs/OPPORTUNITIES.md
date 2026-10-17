@@ -31,7 +31,7 @@
 | # | 題目 | 缺口 | 最接近的現有專案 | MVP | 難度 |
 |---|---|---|---|---|---|
 | 1 | **跨 Claude 與 Codex 的省 token A/B 實測框架**（量帳單成本，不是 bytes） | 獨立研究只測過 Claude Code，沒測 Codex。RTK `gain` 算的是刪掉的 bytes。研究發現 token 減少和成本減少的相關性只有約 0.15，RTK 對帳單大致持平（±5%）。 | PointFiveLabs/ai-efficiency-benchmark（只測 Claude，且有商業利益）、codeburn（沒有 A/B 模式） | `task.yaml` 定義任務與「有／無工具」兩組 → 用 `claude -p --output-format json` 和 `codex exec --json` 收集 token、cache 命中、輪數、成功率 → 產出 markdown 報告與信賴區間 | 中 |
-| 2 | **指令檔預算 linter**（跨兩邊） | 量測 AGENTS.md、CLAUDE.md 與 skill description 的常駐成本和重複內容。Codex 有 32 KiB 的 `project_doc_max_bytes` 上限，Claude 建議 200 行內。ruler／rulesync 只同步、不 lint。 | codeburn（只會標出過大的 CLAUDE.md） | 把 `wb.py budget` 拆成獨立 CLI，接上 token count API 量精準值，再加 pre-commit 與 GitHub Action | 低 ⭐ |
+| 2 | **指令檔預算 linter**（跨兩邊；v0.1 已實作為 `wb.py lint`） | 量測 AGENTS.md、CLAUDE.md 與 skill description 的常駐成本和重複內容。Codex 有 32 KiB 的 `project_doc_max_bytes` 上限，Claude 建議 200 行內。ruler／rulesync 只同步、不 lint。 | codeburn（只會標出過大的 CLAUDE.md） | 把 `wb.py budget` 拆成獨立 CLI，接上 token count API 量精準值，再加 pre-commit 與 GitHub Action | 低 ⭐ |
 | 3 | **中文（CJK）token 稅量測與雙軌精簡器** | 沒人量過中文 CLAUDE.md、skill 和工具輸出在 agent 流程裡的實際開銷。RTK 和 squeez 用 bytes/4 估算，對中文不準。 | caveman `/megacave`（沒有證據） | 量測報告，加上「中文給人看、英文給 agent」的轉換工具 | 低–中 |
 | 4 | **Windows-first hook 套件** | RTK #1319（PowerShell 工具的 matcher）還沒修，而且 `rtk init` 會覆蓋手動設定的 matcher。squeez 需要 Git Bash。很少專案有 Windows 測試矩陣。 | caveman（有 PowerShell 安裝器） | PowerShell 工具也能套用的 hooks、不覆蓋使用者設定的安裝器、Windows CI | 中 |
 | 5 | **Prompt cache 安全檢查器** | 沒有工具會警告 hook、proxy 或動態指令檔打破了 cache 前綴，結果是省了 token 卻多付錢。 | Headroom 的 cache 模式（在研究中表現最差） | 讀 transcript 裡的 `cache_read` 和 `cache_creation`，標出造成 cache miss 的變動 | 中–高 |

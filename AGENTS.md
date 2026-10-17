@@ -6,11 +6,11 @@ Skills and plugins that make Claude Code and Codex cheaper and smoother, and let
 - `plugins/<plugin>/skills/<skill>/SKILL.md`: skills in Agent Skills format, shared by Claude Code and Codex.
 - `plugins/<plugin>/.claude-plugin/plugin.json` and `.codex-plugin/plugin.json`: one manifest per host. Keep `name`, `version` and `description` identical.
 - `.claude-plugin/marketplace.json` and `.agents/plugins/marketplace.json`: list every plugin in both, with relative `./plugins/<name>` sources.
-- `scripts/wb.py`: `new`, `validate`, `budget`, `link`, `unlink`. Stdlib Python only.
+- `scripts/wb.py`: `new`, `validate`, `budget`, `lint`, `link`, `unlink`. Stdlib Python only; tests in `tests/`.
 - `.ai/`: coordination state between agents (see Collaboration).
 
 ## Rules
-- After changing a skill or manifest, run `python scripts/wb.py validate` and make it pass.
+- After changing a skill or manifest, run `python scripts/wb.py validate` and make it pass. After changing scripts, run `python -m unittest discover -s tests`.
 - Write skills in English, imperative, under 500 lines. Move detail into `references/` and say when to read it. Move deterministic work into `scripts/`.
 - A skill's `description` is loaded in every session of every user. Keep it short: what it does, then "Use when" plus trigger phrases.
 - Use only spec frontmatter keys (`name`, `description`, `license`, `metadata`, `compatibility`, `allowed-tools`) unless a host-only key is required.

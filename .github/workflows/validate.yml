@@ -19,6 +19,10 @@ jobs:
         run: python scripts/wb.py validate
       - name: Per-session token budget
         run: python scripts/wb.py budget --max 1500
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Instruction budget lint
+        run: python scripts/wb.py lint --no-global --max-tokens 3000
       - name: Cross-review helper dry run
         run: python plugins/workbench-core/skills/cross-review/scripts/ask_peer.py --peer codex --question "smoke test" --dry-run
 

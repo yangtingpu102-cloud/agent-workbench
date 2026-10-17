@@ -60,7 +60,23 @@
 - **額度用完換手**：在當前 agent 裡說「handoff」；到另一個 agent 裡說「讀 HANDOFF 繼續」。
 - **平行**：在 `.ai/board.md` 各自 claim 不同的 scope，各開 `git worktree`，最後互相 review 再合併。
 
-## 3. 開發本 repo 時的省 token 守則
+## 3. 檢查任何專案的指令檔預算（`wb.py lint`）
+
+```bash
+python scripts/wb.py lint
+```
+
+在任何專案都能用：`python <本 repo>/scripts/wb.py lint <專案路徑>`。它會分別列出 Claude Code 和 Codex 每個 session 固定載入的內容，以及各自約多少 token：
+
+- 使用者層級的 `~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md`，以及 `~/.claude/skills`、`~/.agents/skills` 裡的 skill 說明。加 `--no-global` 可以略過這些。
+- 專案的 `CLAUDE.md`（含 `@` 匯入的檔案）、`AGENTS.md`，以及專案內的 skill。
+- **錯誤**：Codex 文件鏈超過 32 KiB（超過的部分會被截掉）、skill 說明超過 1024 字元。
+- **警告**：同一段文字被載入兩次、`@` 匯入的檔案不存在、CLAUDE.md 超過 200 行。
+- **提示**：CLAUDE.md 整段複製了 AGENTS.md（建議改用 `@AGENTS.md`）、Codex 可能不會展開 `@` 匯入、中文比例高時估算較不準。
+
+`--exact` 會用官方 `anthropic` SDK 精準計算 Claude 的 token（需要安裝套件和 API 憑證）：`uv run --with anthropic python scripts/wb.py lint --exact`。`--max-tokens N` 讓 CI 在超過預算時失敗。
+
+## 4. 開發本 repo 時的省 token 守則
 
 - `AGENTS.md` 維持精簡，目前約 540 tokens，每個 session 都會載入。
 - skill 用英文寫，`docs/` 用中文給人看。agent 只在需要時讀 docs。

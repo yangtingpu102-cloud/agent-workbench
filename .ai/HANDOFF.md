@@ -1,28 +1,25 @@
-# Handoff — 2026-10-16 UTC — claude:a1 on main @ no-commit
+# Handoff — 2026-10-17 06:10 UTC — claude:a1 on feat/budget-linter @ e6f8445+1
 ## Goal
-A cross-host (Claude Code + Codex) plugin repo with a working dev loop, a collaboration protocol, and a ranked opportunity list.
+Ship opportunity #2: `wb.py lint`, a cross-host token-budget linter for CLAUDE.md, AGENTS.md and skill metadata.
 ## State
-done: scaffold complete; initial commit pushed to github.com/yangtingpu102-cloud/agent-workbench (public).
+done: implemented, cross-reviewed by Codex, fixes committed; PR open against main.
 ## Done
-- Both marketplaces and the workbench-core plugin (evidence: `claude plugin validate . --strict` → passed; `codex plugin list` with a `-c marketplaces.*` override → lists workbench-core@agent-workbench)
-- Skills handoff and cross-review (evidence: `python scripts/wb.py validate` → 0 errors, 0 warnings)
-- wb.py link/unlink (evidence: run against a temp WB_HOME → junctions created, then removed; targets intact)
-- ask_peer.py (evidence: `--dry-run` finds codex.exe and claude.exe and builds the commands)
-- Live Claude → Codex cross-review (evidence: 2m12s run, 5 findings, all confirmed and fixed: invalid --base, truncation dropping the untracked list, mklink via cmd, duplicate marketplace names, spaced filenames; each fix covered by a one-off test)
+- `wb.py lint [PATH] [--no-global] [--max-tokens N] [--exact]` (evidence: `python -m unittest discover -s tests` → 13 tests OK)
+- Follows Claude @imports (depth 5, skips code spans and emails), Codex root-to-leaf doc chain with the 32 KiB cap, duplicate paragraphs, CLAUDE.md/AGENTS.md drift, CJK note (evidence: realistic temp fixture → expected tables)
+- `--exact` uses the optional `anthropic` SDK and falls back to estimates (evidence: run without the package → "skipped" warning, exit 0)
+- Codex cross-review: 5 findings; fixed nested CLAUDE.md chains, --max-tokens on every chain, --exact mid-run fallback, line counting; plugin skills stay out of lint totals (that is `wb.py budget`) with an info pointer (evidence: 18 tests OK)
+- CI runs the unit tests and `lint --no-global --max-tokens 3000`
 ## Next
-1. Run one live Codex → Claude cross-review from inside Codex (board T2); this spends Claude quota
-2. Check that the first GitHub Actions run of validate.yml passes on Ubuntu and Windows
-3. Spec the lease-enforcement hooks (board T4, opportunity #6)
+1. Merge the PR once CI passes on Ubuntu and Windows
+2. Live-test `--exact` with credentials: `uv run --with anthropic python scripts/wb.py lint --exact`
+3. Codex → Claude cross-review from inside Codex (board T2)
 ## Files
-- AGENTS.md: canonical rules for every agent (CLAUDE.md imports it)
-- scripts/wb.py: new, validate, budget, link, unlink
-- plugins/workbench-core/: manifests for both hosts and the two skills
-- docs/OPPORTUNITIES.md, docs/CONNECTORS.md, docs/WORKFLOW.md, docs/COLLAB-PROTOCOL.md
+- scripts/wb.py: `Lint` class and `cmd_lint`; `main` now uses `build_parser()`
+- tests/test_wb.py: lint and helper tests (use WB_HOME for a fake home)
+- docs/WORKFLOW.md §3: user-facing description (zh-TW)
 ## Verify
-`python scripts/wb.py validate && claude plugin validate . --strict`
+`python -m unittest discover -s tests && python scripts/wb.py lint`
 ## Gotchas
-- `claude plugin init <name>` with no path writes into ~/.claude/skills, where it auto-loads. Run it from an explicit temp dir.
-- codex.exe lives in %LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\ and the hash changes when Codex updates.
-- `codex mcp-server` was removed (2026-08). `--max-turns` is not in `claude --help`, so the scripts do not use it (unverified).
-- The Codex → Claude direction has not been run live (unverified).
-- The scratchpad path is too long for git on Windows ("Filename too long"). Run throwaway git tests in `mktemp -d`.
+- Codex is not documented to expand @imports; lint reports it as info, not an error (unverified either way).
+- The background worktree session failed with `config-hooks-refused`, likely the `!gh auth git-credential` helper in global git config (unverified).
+- Skill metadata is always estimated, even with --exact.
