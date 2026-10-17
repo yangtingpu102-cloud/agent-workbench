@@ -19,7 +19,7 @@ Skills and plugins that make Claude Code and Codex cheaper and smoother, and let
 
 ## Collaboration (when more than one agent works here)
 1. Orient from `.ai/HANDOFF.md` and `.ai/board.md` first, not by scanning the repo.
-2. Claim a task before editing: set owner, scope and lease in its board row. Do not edit files inside another agent's unexpired lease.
+2. Claim a task before editing: set owner, scope and lease in its board row, then `python plugins/workbench-lease/skills/lease/scripts/lease.py claim <id> --scope <paths> --host <claude|codex>`. Do not edit files inside another branch's live lease.
 3. One writer per file set. When two agents write code at once, give each its own git worktree and branch.
 4. When you finish or pause, write `.ai/HANDOFF.md` with the `handoff` skill and release your row.
 5. The implementer does not verify their own work. The other agent reviews with the `cross-review` skill before merge.

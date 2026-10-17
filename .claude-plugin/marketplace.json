@@ -9,6 +9,11 @@
       "name": "workbench-core",
       "source": "./plugins/workbench-core",
       "description": "Cross-agent handoff and read-only cross-review between Claude Code and Codex."
+    },
+    {
+      "name": "workbench-lease",
+      "source": "./plugins/workbench-lease",
+      "description": "File leases for agents sharing a repo, enforced by PreToolUse hooks in Claude Code and Codex."
     }
   ]
 }

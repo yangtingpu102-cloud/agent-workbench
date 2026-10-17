@@ -1,25 +1,24 @@
-# Handoff — 2026-10-17 06:10 UTC — claude:a1 on feat/budget-linter @ e6f8445+1
+# Handoff — 2026-10-17 07:00 UTC — claude:a1 on feat/lease-hooks @ 4eafd64+1
 ## Goal
-Ship opportunity #2: `wb.py lint`, a cross-host token-budget linter for CLAUDE.md, AGENTS.md and skill metadata.
+Ship opportunity #6: the workbench-lease plugin, file leases per branch enforced by PreToolUse hooks in Claude Code and Codex.
 ## State
-done: implemented, cross-reviewed by Codex, fixes committed; PR open against main.
+in progress: implemented and committed on feat/lease-hooks; not pushed, not cross-reviewed, not live-tested in a real agent session.
 ## Done
-- `wb.py lint [PATH] [--no-global] [--max-tokens N] [--exact]` (evidence: `python -m unittest discover -s tests` → 13 tests OK)
-- Follows Claude @imports (depth 5, skips code spans and emails), Codex root-to-leaf doc chain with the 32 KiB cap, duplicate paragraphs, CLAUDE.md/AGENTS.md drift, CJK note (evidence: realistic temp fixture → expected tables)
-- `--exact` uses the optional `anthropic` SDK and falls back to estimates (evidence: run without the package → "skipped" warning, exit 0)
-- Codex cross-review: 5 findings; fixed nested CLAUDE.md chains, --max-tokens on every chain, --exact mid-run fallback, line counting; plugin skills stay out of lint totals (that is `wb.py budget`) with an info pointer (evidence: 18 tests OK)
-- CI runs the unit tests and `lint --no-global --max-tokens 3000`
+- lease.py claim/renew/release/list/check/hook; leases in <git common dir>/agent-leases, owned by branch (evidence: `python -m unittest discover -s tests` → 35 tests OK)
+- Hook denies through stdout JSON and always exits 0, because PowerShell turns exit 2 into 1 (evidence: HookConfigTest runs the exact codex.hooks.json command via `powershell -NoProfile -Command` → deny)
+- Claude hooks/hooks.json (exec form `python` + args) and Codex hooks/codex.hooks.json (`commandWindows`, `$env:PLUGIN_ROOT`, matcher apply_patch|Bash) (evidence: `claude plugin validate plugins/workbench-lease --strict` → passed)
 ## Next
-1. Merge the PR once CI passes on Ubuntu and Windows
-2. Live-test `--exact` with credentials: `uv run --with anthropic python scripts/wb.py lint --exact`
-3. Codex → Claude cross-review from inside Codex (board T2)
+1. After 17:57 local (Codex quota reset): Codex cross-review `--base main`, then push and open a PR
+2. Live test in Codex: temp repo, `.codex/hooks.json` from codex.hooks.json, `PLUGIN_ROOT` and `LEASE_HOOK_LOG` set, `codex exec --dangerously-bypass-hook-trust --sandbox workspace-write`
+3. Live test in Claude after the user re-logs in the CLI: `claude -p --plugin-dir plugins/workbench-lease --permission-mode acceptEdits` in a worktree of a leased temp repo (unset CLAUDECODE first)
 ## Files
-- scripts/wb.py: `Lint` class and `cmd_lint`; `main` now uses `build_parser()`
-- tests/test_wb.py: lint and helper tests (use WB_HOME for a fake home)
-- docs/WORKFLOW.md §3: user-facing description (zh-TW)
+- plugins/workbench-lease/skills/lease/scripts/lease.py: all logic; `LEASE_HOOK_LOG` writes one JSON line per hook call
+- plugins/workbench-lease/hooks/: hooks.json (Claude), codex.hooks.json (Codex, referenced from .codex-plugin/plugin.json)
+- tests/test_lease.py: RepoCase builds a repo + worktree; HookConfigTest runs the configured commands
 ## Verify
-`python -m unittest discover -s tests && python scripts/wb.py lint`
+`python -m unittest discover -s tests && python scripts/wb.py validate`
 ## Gotchas
-- Codex is not documented to expand @imports; lint reports it as info, not an error (unverified either way).
-- The background worktree session failed with `config-hooks-refused`, likely the `!gh auth git-credential` helper in global git config (unverified).
-- Skill metadata is always estimated, even with --exact.
+- Codex hook payload for edits: tool_name apply_patch, tool_input {"command": "<patch>"}; shell calls are tool_name Bash (from source, rust-v0.162.0; not yet seen live).
+- Codex skips plugin hooks until trusted in /hooks.
+- Claude exec form needs `python` on PATH; without it the hook does not run (fails open).
+- The CLI `claude` here reported "OAuth session expired"; the desktop app is unaffected.

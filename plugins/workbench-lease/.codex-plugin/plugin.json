@@ -1,0 +1,31 @@
+{
+  "name": "workbench-lease",
+  "version": "0.1.0",
+  "description": "File leases for agents sharing a repo, enforced by PreToolUse hooks in Claude Code and Codex.",
+  "author": {
+    "name": "wayne yan"
+  },
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Workbench Lease",
+    "shortDescription": "Stop agents on other branches from editing your files",
+    "developerName": "wayne yan",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read"
+    ],
+    "defaultPrompt": [
+      "Claim the files for this task",
+      "Who holds leases in this repo?"
+    ]
+  },
+  "keywords": [
+    "multi-agent",
+    "lease",
+    "lock",
+    "hooks",
+    "worktree"
+  ],
+  "hooks": "./hooks/codex.hooks.json"
+}
