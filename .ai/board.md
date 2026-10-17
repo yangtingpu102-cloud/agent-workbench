@@ -14,3 +14,4 @@ Times are UTC. Once a lease time has passed, anyone may take the task.
 |----|------|-------|----------|----------|
 | T0 | Scaffold the repo, both marketplaces, seed skills and wb.py | claude | 2026-10-16 | `python scripts/wb.py validate` → 0 errors |
 | T1 | Pick the repo name and owner, then push to GitHub | human + claude | 2026-10-17 | github.com/yangtingpu102-cloud/agent-workbench |
+| T5 | Opportunity #2: instruction budget linter (`wb.py lint`) | claude:a1 | 2026-10-17 | 13 unit tests pass; branch feat/budget-linter |

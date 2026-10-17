@@ -3,7 +3,8 @@
 
   python scripts/wb.py new <plugin> <skill>   scaffold a skill (and the plugin if new)
   python scripts/wb.py validate               check skills, manifests and both marketplaces
-  python scripts/wb.py budget [--max N]       estimate always-loaded token cost
+  python scripts/wb.py budget [--max N]       estimate always-loaded token cost of this repo's plugins
+  python scripts/wb.py lint [PATH]            audit a project's CLAUDE.md / AGENTS.md / skills token budget
   python scripts/wb.py link [--host H]        link skills into ~/.claude/skills and ~/.agents/skills
   python scripts/wb.py unlink [--host H]      remove only links that point into this repo
 
@@ -239,6 +240,259 @@ def cmd_budget(args) -> int:
     return 0
 
 
+# ---------- lint ----------
+
+CODEX_DOC_MAX_BYTES = 32 * 1024  # Codex default project_doc_max_bytes
+CLAUDE_MAX_LINES = 200           # Claude Code guidance for CLAUDE.md size
+IMPORT_DEPTH = 5                 # Claude Code follows @imports up to 5 hops
+EXACT_MODEL = "claude-opus-5-5"
+SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", "target", ".tox"}
+SKILL_DIRS = {"claude": [".claude/skills"], "codex": [".agents/skills", ".codex/skills"]}
+LEVELS = ("ERROR", "warn", "info")
+
+
+class Loaded:
+    def __init__(self, path: Path, scope: str, how: str = ""):
+        self.path, self.scope, self.how = path, scope, how
+        self.text = path.read_text(encoding="utf-8", errors="replace")
+        self.tokens = est_tokens(self.text)
+        self.lines = self.text.count("\n") + 1
+
+
+def strip_code(text: str) -> str:
+    text = re.sub(r"```.*?```", "", text, flags=re.S)
+    return re.sub(r"`[^`\n]*`", "", text)
+
+
+def paragraphs(text: str) -> set[str]:
+    return {p for p in (" ".join(b.split()) for b in re.split(r"\n\s*\n", text)) if len(p) >= 40}
+
+
+def same_file(a: Path, b: Path) -> bool:
+    return os.path.normcase(str(a.resolve())) == os.path.normcase(str(b.resolve()))
+
+
+class Lint:
+    def __init__(self, root: Path, home: Path, use_global: bool):
+        self.root, self.home, self.use_global = root.resolve(), home, use_global
+        self.notes: list[tuple[str, str]] = []
+
+    def note(self, level: str, msg: str) -> None:
+        self.notes.append((level, msg))
+
+    def show(self, p: Path) -> str:
+        p = p.resolve()
+        for base, prefix in ((self.root, ""), (self.home.resolve(), "~/")):
+            if p.is_relative_to(base):
+                return prefix + p.relative_to(base).as_posix()
+        return str(p)
+
+    def imports(self, path: Path, text: str) -> tuple[list[Path], list[str]]:
+        """Claude Code `@path` imports outside code: relative to the importing file, `~/` = home."""
+        found, missing = [], []
+        for m in re.finditer(r"(?:^|\s)@(\S+)", strip_code(text)):
+            raw = m.group(1).rstrip(".,;:)")
+            if raw[:2] in ("~/", "~\\"):
+                target = self.home / raw[2:]
+            else:
+                target = Path(raw) if Path(raw).is_absolute() else path.parent / raw
+            if target.is_file():
+                found.append(target)
+            elif "/" in raw or "\\" in raw or raw.lower().endswith(".md"):
+                missing.append(raw)
+        return found, missing
+
+    def load(self, path: Path, scope: str, out: list[Loaded], how: str = "", depth: int = 0) -> None:
+        if any(same_file(path, f.path) for f in out):
+            return
+        item = Loaded(path, scope, how)
+        out.append(item)
+        found, missing = self.imports(path, item.text)
+        for raw in missing:
+            self.note("warn", f"{self.show(path)}: @{raw} not found")
+        if depth < IMPORT_DEPTH:
+            for target in found:
+                self.load(target, scope, out, "@import", depth + 1)
+
+    def claude_files(self) -> list[Loaded]:
+        out: list[Loaded] = []
+        if self.use_global and (self.home / ".claude" / "CLAUDE.md").is_file():
+            self.load(self.home / ".claude" / "CLAUDE.md", "user", out)
+        present = [p for p in (self.root / "CLAUDE.md", self.root / ".claude" / "CLAUDE.md",
+                               self.root / "CLAUDE.local.md") if p.is_file()]
+        for p in present:
+            self.load(p, "project", out)
+        if not any(p.name == "CLAUDE.md" for p in present) and (self.root / "AGENTS.md").is_file():
+            self.load(self.root / "AGENTS.md", "project", out, "read natively when there is no CLAUDE.md")
+        return out
+
+    def codex_doc(self, d: Path) -> Path | None:
+        return next((d / n for n in ("AGENTS.override.md", "AGENTS.md") if (d / n).is_file()), None)
+
+    def chain_bytes(self, d: Path) -> int:
+        """Codex concatenates one doc per directory from the project root down to the working dir."""
+        total, cur = 0, d
+        while True:
+            doc = self.codex_doc(cur)
+            total += doc.stat().st_size if doc else 0
+            if cur == self.root:
+                return total
+            cur = cur.parent
+
+    def codex_files(self) -> tuple[list[Loaded], list[tuple[Path, int]]]:
+        out: list[Loaded] = []
+        if self.use_global:
+            env_home = os.environ.get("CODEX_HOME") if not os.environ.get("WB_HOME") else None
+            doc = self.codex_doc(Path(env_home) if env_home else self.home / ".codex")
+            if doc:
+                out.append(Loaded(doc, "user"))
+        doc = self.codex_doc(self.root)
+        if doc:
+            out.append(Loaded(doc, "project"))
+        nested = []
+        for dirpath, dirnames, _ in os.walk(self.root):
+            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            d = Path(dirpath)
+            if d != self.root and self.codex_doc(d):
+                nested.append((self.codex_doc(d), self.chain_bytes(d)))
+        return out, nested
+
+    def skills(self, host: str) -> list[tuple[str, str, int, int]]:
+        """(location, scope, skill count, metadata tokens) for skills the host loads every session."""
+        rows = []
+        for rel_dir in SKILL_DIRS[host]:
+            bases = [(self.root / rel_dir, "project")] + ([(self.home / rel_dir, "user")] if self.use_global else [])
+            for base, scope in bases:
+                files = sorted(base.glob("*/SKILL.md"))
+                tokens = 0
+                for md in files:
+                    meta, _ = read_frontmatter(md)
+                    desc = meta.get("description", "")
+                    if len(desc) > 1024:
+                        self.note("ERROR", f"{self.show(md)}: description is {len(desc)} chars (max 1024)")
+                    tokens += est_tokens(meta.get("name", "") + " " + desc)
+                if files:
+                    rows.append((self.show(base), scope, len(files), tokens))
+        return rows
+
+    def check_files(self, host: str, files: list[Loaded]) -> None:
+        owner: dict[str, Loaded] = {}
+        wasted, sample, pairs = 0, "", set()
+        for f in files:
+            for para in paragraphs(f.text):
+                if para in owner:
+                    wasted += est_tokens(para)
+                    sample = sample or para
+                    pairs.add(f"{self.show(owner[para].path)} = {self.show(f.path)}")
+                else:
+                    owner[para] = f
+        if wasted:
+            self.note("warn", f"{host}: ~{wasted} tokens of paragraphs load twice ({'; '.join(sorted(pairs))}), "
+                              f"e.g. \"{sample[:60]}...\"")
+        for f in files:
+            non_ascii = sum(1 for ch in f.text if ord(ch) > 127)
+            if f.text and non_ascii / len(f.text) > 0.3:
+                self.note("info", f"{self.show(f.path)}: {round(100 * non_ascii / len(f.text))}% non-ASCII, so the "
+                                  "estimate is rough (try --exact); English instructions usually cost somewhat fewer tokens")
+
+    def check_drift(self, claude: list[Loaded]) -> None:
+        claude_md, agents_md = self.root / "CLAUDE.md", self.root / "AGENTS.md"
+        if not (claude_md.is_file() and agents_md.is_file()) or any(same_file(agents_md, f.path) for f in claude):
+            return
+        a = paragraphs(agents_md.read_text(encoding="utf-8", errors="replace"))
+        shared = a & paragraphs(claude_md.read_text(encoding="utf-8", errors="replace"))
+        if a and len(shared) / len(a) >= 0.3:
+            self.note("info", f"CLAUDE.md repeats {len(shared)} of {len(a)} AGENTS.md paragraphs; "
+                              "replace the copy with `@AGENTS.md` so the two cannot drift apart")
+
+
+def exact_counter():
+    """Exact Claude token counts via the official SDK (optional; this repo stays stdlib-only otherwise)."""
+    try:
+        from anthropic import Anthropic
+    except ImportError:
+        return None, "the `anthropic` package is not installed: uv run --with anthropic python scripts/wb.py lint --exact"
+    try:
+        client = Anthropic()
+
+        def count(text: str) -> int:
+            return client.messages.count_tokens(
+                model=EXACT_MODEL, messages=[{"role": "user", "content": text}]).input_tokens
+
+        overhead = count("a") - 1  # tokens the message wrapper adds
+    except Exception as e:  # missing credentials, network, API errors: fall back to estimates
+        return None, f"token counting failed ({type(e).__name__}: {e})"
+    return (lambda text: max(0, count(text) - overhead) if text.strip() else 0), ""
+
+
+def print_host(title: str, files: list[Loaded], skill_rows: list[tuple[str, str, int, int]], lint: Lint) -> int:
+    print(title)
+    rows = [(f.tokens, lint.show(f.path), f.scope, f.how) for f in files]
+    rows += [(t, f"{n} skill(s) in {loc}", scope, "name + description") for loc, scope, n, t in skill_rows]
+    for tokens, label, scope, how in rows:
+        print(f"  {tokens:>7}  {label}  ({scope}{', ' + how if how else ''})")
+    project = sum(r[0] for r in rows if r[2] == "project")
+    user = sum(r[0] for r in rows if r[2] == "user")
+    print(f"  {project + user:>7}  TOTAL  (project {project}, user {user})\n")
+    return project
+
+
+def cmd_lint(args) -> int:
+    root = Path(args.path)
+    if not root.is_dir():
+        print(f"not a directory: {root}")
+        return 1
+    lint = Lint(root, link_home(), not args.no_global)
+    claude = lint.claude_files()
+    codex, nested = lint.codex_files()
+    claude_skills, codex_skills = lint.skills("claude"), lint.skills("codex")
+
+    label = "estimated: ASCII/4 + 1 per non-ASCII char"
+    if args.exact:
+        counter, problem = exact_counter()
+        if counter:
+            for f in claude:
+                f.tokens = counter(f.text)
+            label = f"Claude counted exactly with {EXACT_MODEL}; Codex {label}"
+        else:
+            lint.note("warn", f"--exact skipped: {problem}")
+
+    print(f"Instruction budget for {lint.root}\n({label}; skill metadata is always estimated)\n")
+    claude_total = print_host("Claude Code: loaded every session", claude, claude_skills, lint)
+    codex_total = print_host("Codex: loaded every session at the repo root", codex, codex_skills, lint)
+    if nested:
+        print("Codex: nested docs, loaded when working inside that directory")
+        for doc, size in nested:
+            print(f"  {size:>7}  bytes in the chain ending at {lint.show(doc)}")
+        print()
+
+    for f in claude:
+        if f.lines > CLAUDE_MAX_LINES and f.scope == "project":
+            lint.note("warn", f"{lint.show(f.path)}: {f.lines} lines (Claude Code suggests under {CLAUDE_MAX_LINES})")
+    for doc, size in [(f.path, lint.chain_bytes(lint.root)) for f in codex if f.scope == "project"] + nested:
+        if size > CODEX_DOC_MAX_BYTES:
+            lint.note("ERROR", f"{lint.show(doc)}: the Codex doc chain is {size} bytes; Codex stops reading at "
+                               f"{CODEX_DOC_MAX_BYTES} (project_doc_max_bytes), so the rest is cut off")
+    for f in codex:
+        if lint.imports(f.path, f.text)[0]:
+            lint.note("info", f"{lint.show(f.path)}: has @import lines; Codex is not documented to expand them, "
+                              "so the imported file may not load in Codex")
+    lint.check_files("Claude Code", claude)
+    lint.check_files("Codex", codex)
+    lint.check_drift(claude)
+
+    for level in LEVELS:
+        for lvl, msg in lint.notes:
+            if lvl == level:
+                print(f"{level:<5} {msg}")
+    errors = sum(1 for lvl, _ in lint.notes if lvl == "ERROR")
+    if args.max_tokens is not None and max(claude_total, codex_total) > args.max_tokens:
+        print(f"FAIL  project instructions cost ~{max(claude_total, codex_total)} tokens per session "
+              f"(--max-tokens {args.max_tokens})")
+        return 1
+    return 1 if errors else 0
+
+
 # ---------- link / unlink ----------
 
 def link_home() -> Path:
@@ -308,7 +562,7 @@ def cmd_unlink(args) -> int:
     return 0
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("new")
@@ -318,11 +572,20 @@ def main() -> int:
     sub.add_parser("validate")
     p = sub.add_parser("budget")
     p.add_argument("--max", type=int, help="fail if per-session skill metadata exceeds N tokens")
+    p = sub.add_parser("lint")
+    p.add_argument("path", nargs="?", default=".", help="project to lint (default: current directory)")
+    p.add_argument("--max-tokens", type=int, help="fail if a host's project instructions exceed N tokens")
+    p.add_argument("--no-global", action="store_true", help="skip user-level files in your home directory")
+    p.add_argument("--exact", action="store_true", help="count Claude tokens with the API (needs `anthropic`)")
     for name in ("link", "unlink"):
         p = sub.add_parser(name)
         p.add_argument("--host", choices=["claude", "codex", "both"], default="both")
-    args = ap.parse_args()
-    return {"new": cmd_new, "validate": cmd_validate, "budget": cmd_budget,
+    return ap
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    return {"new": cmd_new, "validate": cmd_validate, "budget": cmd_budget, "lint": cmd_lint,
             "link": cmd_link, "unlink": cmd_unlink}[args.cmd](args)
 
 
