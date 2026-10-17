@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "workbench-lease",
+  "version": "0.1.0",
+  "description": "File leases for agents sharing a repo, enforced by PreToolUse hooks in Claude Code and Codex.",
+  "author": {
+    "name": "wayne yan"
+  },
+  "license": "MIT",
+  "keywords": [
+    "multi-agent",
+    "lease",
+    "lock",
+    "hooks",
+    "worktree"
+  ]
+}

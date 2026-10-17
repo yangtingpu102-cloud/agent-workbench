@@ -1,0 +1,19 @@
+{
+  "description": "Block edits to files that another branch has leased (agent-workbench).",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "apply_patch|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/skills/lease/scripts/lease.py\" hook --host codex",
+            "commandWindows": "python \"$env:PLUGIN_ROOT/skills/lease/scripts/lease.py\" hook --host codex",
+            "timeout": 10,
+            "statusMessage": "Checking file leases"
+          }
+        ]
+      }
+    ]
+  }
+}

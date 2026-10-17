@@ -58,7 +58,7 @@
 
 - **Claude 實作、Codex 審查**：在 Claude Code 裡說「cross-review」，或直接在終端執行 `codex review --uncommitted`。
 - **額度用完換手**：在當前 agent 裡說「handoff」；到另一個 agent 裡說「讀 HANDOFF 繼續」。
-- **平行**：在 `.ai/board.md` 各自 claim 不同的 scope，各開 `git worktree`，最後互相 review 再合併。
+- **平行**：在 `.ai/board.md` 各自 claim 不同的 scope，各開 `git worktree`，最後互相 review 再合併。裝了 `workbench-lease` 的話，再用 `lease.py claim` 取得租約，其他分支的 agent 就改不到你的檔案（見 `docs/COLLAB-PROTOCOL.md`）。
 
 ## 3. 檢查任何專案的指令檔預算（`wb.py lint`）
 

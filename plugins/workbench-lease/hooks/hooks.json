@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/skills/lease/scripts/lease.py", "hook", "--host", "claude"],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

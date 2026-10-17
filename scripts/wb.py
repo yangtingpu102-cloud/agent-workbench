@@ -57,7 +57,7 @@ def load_json(path: Path, errors: list[str]) -> dict | None:
 
 def save_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
 
 
 def read_frontmatter(path: Path) -> tuple[dict[str, str], str]:
@@ -133,7 +133,7 @@ def cmd_new(args) -> int:
         return 1
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(TEMPLATE.read_text(encoding="utf-8").replace("{{name}}", args.skill),
-                                        encoding="utf-8")
+                                        encoding="utf-8", newline="\n")
     print(f"created {rel(skill_dir)}/SKILL.md. Write the description first, then run: python scripts/wb.py validate")
     return 0
 
@@ -175,6 +175,11 @@ def cmd_validate(_args) -> int:
             path = source_path(entry)
             if not path or not path.startswith("./") or (ROOT / path).resolve() != plugin.resolve():
                 errors.append(f"{label} marketplace: '{name}' source {path!r} should be './plugins/{name}'")
+        for hooks_file in sorted(plugin.glob("hooks/*.json")):
+            load_json(hooks_file, errors)
+        codex_hooks = manifests.get("codex", {}).get("hooks")
+        if isinstance(codex_hooks, str) and not (plugin / codex_hooks).is_file():
+            errors.append(f"plugins/{name}/.codex-plugin/plugin.json: hooks file {codex_hooks!r} not found")
         if not list(plugin.glob("skills/*/SKILL.md")):
             warnings.append(f"plugins/{name}: has no skills")
 

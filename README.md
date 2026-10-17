@@ -15,12 +15,13 @@ Skills and plugins that make **Claude Code** and **OpenAI Codex** cheaper and sm
 |---|---|---|
 | `workbench-core` | `handoff` | Writes or resumes a 40-line `.ai/HANDOFF.md`, so the next agent continues without re-exploring the repo |
 | | `cross-review` | Asks the other agent (Claude ↔ Codex) for a read-only review of your diff and saves the verdict with the commit SHA |
+| `workbench-lease` | `lease` + PreToolUse hooks | File leases per branch, shared by all worktrees; blocks Claude Code and Codex edits to files another branch has leased |
 
 Always-loaded cost of `workbench-core` is about 190 tokens per session (`python scripts/wb.py budget`).
 
 ## Multi-agent protocol
 
-Plain files, no server, works natively on Windows: `.ai/board.md` for claims and leases, `.ai/HANDOFF.md` for handoffs, and `.ai/reviews/` for review evidence. See [docs/COLLAB-PROTOCOL.md](docs/COLLAB-PROTOCOL.md).
+Plain files, no server, works natively on Windows: `.ai/board.md` for tasks, `.ai/HANDOFF.md` for handoffs, `.ai/reviews/` for review evidence, and lease files in the git common dir that the `workbench-lease` hooks enforce. See [docs/COLLAB-PROTOCOL.md](docs/COLLAB-PROTOCOL.md).
 
 ## Develop
 
