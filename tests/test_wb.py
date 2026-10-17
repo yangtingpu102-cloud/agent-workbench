@@ -78,7 +78,7 @@ class LintTest(unittest.TestCase):
         self.write("pkg/AGENTS.md", "y" * 15000)
         code, out = self.lint()
         self.assertEqual(code, 1)
-        self.assertIn("35000  bytes in the chain ending at pkg/AGENTS.md", out)
+        self.assertIn("chain ending at pkg/AGENTS.md (35000 bytes)", out)
         self.assertIn("ERROR pkg/AGENTS.md", out)
 
     def test_paragraph_loaded_twice_across_user_and_project(self):
@@ -113,6 +113,50 @@ class LintTest(unittest.TestCase):
         code, out = self.lint("--max-tokens", "100")
         self.assertEqual(code, 1)
         self.assertIn("FAIL", out)
+
+    def test_nested_claude_md_is_reported_with_its_chain(self):
+        self.write("CLAUDE.md", "root " * 40)
+        self.write("pkg/CLAUDE.md", "pkg " * 40)
+        _, out = self.lint()
+        self.assertIn("nested CLAUDE.md", out)
+        self.assertIn("chain ending at pkg/CLAUDE.md", out)
+
+    def test_max_tokens_covers_nested_chains(self):
+        self.write("AGENTS.md", "small root doc")
+        self.write("pkg/AGENTS.md", "word " * 2000)
+        code, out = self.lint("--max-tokens", "1000")
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL  the Codex chain ending at pkg/AGENTS.md", out)
+
+    def test_exact_failure_mid_run_falls_back_to_estimates(self):
+        self.write("CLAUDE.md", "@AGENTS.md\n")
+        self.write("AGENTS.md", "rules " * 50)
+        calls = []
+
+        def flaky(text):
+            calls.append(text)
+            if len(calls) > 1:
+                raise ConnectionError("network down")
+            return 7
+
+        with mock.patch.object(wb, "exact_counter", return_value=(flaky, "")):
+            code, out = self.lint("--exact")
+        self.assertEqual(code, 0)
+        self.assertIn("--exact skipped, showing estimates: network down", out)
+        self.assertNotIn("counted exactly", out)
+
+    def test_line_count_ignores_the_trailing_newline(self):
+        self.write("CLAUDE.md", "line\n" * wb.CLAUDE_MAX_LINES)
+        _, out = self.lint()
+        self.assertNotIn("Claude Code suggests", out)
+        self.write("CLAUDE.md", "line\n" * (wb.CLAUDE_MAX_LINES + 1))
+        _, out = self.lint()
+        self.assertIn("Claude Code suggests", out)
+
+    def test_plugin_skills_get_a_pointer_to_budget(self):
+        self.write("plugins/p/skills/s/SKILL.md", "---\nname: s\ndescription: d\n---\n")
+        _, out = self.lint()
+        self.assertIn("see `wb.py budget`", out)
 
     def test_cjk_heavy_file_gets_a_note(self):
         self.write("CLAUDE.md", "請用繁體中文回答，並且保持回覆簡短。" * 5)

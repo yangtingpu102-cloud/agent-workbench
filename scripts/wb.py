@@ -202,7 +202,7 @@ def cmd_validate(_args) -> int:
             warnings.append(f"{where}: description should say 'Use when ...' with trigger phrases")
         if "TODO" in desc or "TODO" in body:
             warnings.append(f"{where}: still contains TODO")
-        lines = body.count("\n") + 1
+        lines = len(body.splitlines())
         if lines > MAX_SKILL_LINES:
             warnings.append(f"{where}: {lines} lines; move detail into references/ (target < {MAX_SKILL_LINES})")
 
@@ -256,7 +256,7 @@ class Loaded:
         self.path, self.scope, self.how = path, scope, how
         self.text = path.read_text(encoding="utf-8", errors="replace")
         self.tokens = est_tokens(self.text)
-        self.lines = self.text.count("\n") + 1
+        self.lines = len(self.text.splitlines())
 
 
 def strip_code(text: str) -> str:
@@ -278,7 +278,8 @@ class Lint:
         self.notes: list[tuple[str, str]] = []
 
     def note(self, level: str, msg: str) -> None:
-        self.notes.append((level, msg))
+        if (level, msg) not in self.notes:
+            self.notes.append((level, msg))
 
     def show(self, p: Path) -> str:
         p = p.resolve()
@@ -326,20 +327,47 @@ class Lint:
             self.load(self.root / "AGENTS.md", "project", out, "read natively when there is no CLAUDE.md")
         return out
 
+    def subdirs(self) -> list[Path]:
+        found = []
+        for dirpath, dirnames, _ in os.walk(self.root):
+            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            if Path(dirpath) != self.root:
+                found.append(Path(dirpath))
+        return found
+
+    def ancestry(self, d: Path) -> list[Path]:
+        """Directories from the project root down to d, inclusive."""
+        chain = [d]
+        while chain[-1] != self.root:
+            chain.append(chain[-1].parent)
+        return chain[::-1]
+
+    def nested_claude(self, root_files: list[Loaded]) -> list[tuple[Path, list[Loaded]]]:
+        """CLAUDE.md below the root: loaded with its ancestors when Claude works inside that directory."""
+        out = []
+        for d in self.subdirs():
+            if (d / "CLAUDE.md").is_file():
+                files = [f for f in root_files if f.scope == "project"]
+                for anc in self.ancestry(d)[1:]:
+                    if (anc / "CLAUDE.md").is_file():
+                        self.load(anc / "CLAUDE.md", "project", files)
+                out.append((d / "CLAUDE.md", files))
+        return out
+
     def codex_doc(self, d: Path) -> Path | None:
         return next((d / n for n in ("AGENTS.override.md", "AGENTS.md") if (d / n).is_file()), None)
 
-    def chain_bytes(self, d: Path) -> int:
+    def chain_docs(self, d: Path) -> list[Path]:
         """Codex concatenates one doc per directory from the project root down to the working dir."""
-        total, cur = 0, d
-        while True:
-            doc = self.codex_doc(cur)
-            total += doc.stat().st_size if doc else 0
-            if cur == self.root:
-                return total
-            cur = cur.parent
+        return [doc for doc in map(self.codex_doc, self.ancestry(d)) if doc]
 
-    def codex_files(self) -> tuple[list[Loaded], list[tuple[Path, int]]]:
+    def chain_bytes(self, d: Path) -> int:
+        return sum(doc.stat().st_size for doc in self.chain_docs(d))
+
+    def chain_tokens(self, d: Path) -> int:
+        return sum(est_tokens(doc.read_text(encoding="utf-8", errors="replace")) for doc in self.chain_docs(d))
+
+    def codex_files(self) -> tuple[list[Loaded], list[tuple[Path, int, int]]]:
         out: list[Loaded] = []
         if self.use_global:
             env_home = os.environ.get("CODEX_HOME") if not os.environ.get("WB_HOME") else None
@@ -349,12 +377,8 @@ class Lint:
         doc = self.codex_doc(self.root)
         if doc:
             out.append(Loaded(doc, "project"))
-        nested = []
-        for dirpath, dirnames, _ in os.walk(self.root):
-            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
-            d = Path(dirpath)
-            if d != self.root and self.codex_doc(d):
-                nested.append((self.codex_doc(d), self.chain_bytes(d)))
+        nested = [(self.codex_doc(d), self.chain_bytes(d), self.chain_tokens(d))
+                  for d in self.subdirs() if self.codex_doc(d)]
         return out, nested
 
     def skills(self, host: str) -> list[tuple[str, str, int, int]]:
@@ -444,32 +468,52 @@ def cmd_lint(args) -> int:
         return 1
     lint = Lint(root, link_home(), not args.no_global)
     claude = lint.claude_files()
-    codex, nested = lint.codex_files()
+    claude_nested = lint.nested_claude(claude)
+    codex, codex_nested = lint.codex_files()
     claude_skills, codex_skills = lint.skills("claude"), lint.skills("codex")
+    all_claude = {id(f): f for f in claude + [f for _, files in claude_nested for f in files]}
 
     label = "estimated: ASCII/4 + 1 per non-ASCII char"
     if args.exact:
         counter, problem = exact_counter()
-        if counter:
-            for f in claude:
+        try:
+            if not counter:
+                raise RuntimeError(problem)
+            for f in all_claude.values():
                 f.tokens = counter(f.text)
             label = f"Claude counted exactly with {EXACT_MODEL}; Codex {label}"
-        else:
-            lint.note("warn", f"--exact skipped: {problem}")
+        except Exception as e:  # a failure mid-run reverts every file, so the table never mixes methods
+            for f in all_claude.values():
+                f.tokens = est_tokens(f.text)
+            lint.note("warn", f"--exact skipped, showing estimates: {e}")
 
     print(f"Instruction budget for {lint.root}\n({label}; skill metadata is always estimated)\n")
-    claude_total = print_host("Claude Code: loaded every session", claude, claude_skills, lint)
-    codex_total = print_host("Codex: loaded every session at the repo root", codex, codex_skills, lint)
-    if nested:
-        print("Codex: nested docs, loaded when working inside that directory")
-        for doc, size in nested:
-            print(f"  {size:>7}  bytes in the chain ending at {lint.show(doc)}")
+    totals = {"Claude Code at the repo root": print_host("Claude Code: loaded every session", claude, claude_skills, lint),
+              "Codex at the repo root": print_host("Codex: loaded every session at the repo root",
+                                                   codex, codex_skills, lint)}
+    if claude_nested:
+        print("Claude Code: nested CLAUDE.md, loaded with its ancestors when working inside that directory")
+        for doc, files in claude_nested:
+            tokens = sum(f.tokens for f in files)
+            totals[f"the Claude chain ending at {lint.show(doc)}"] = tokens
+            print(f"  {tokens:>7}  chain ending at {lint.show(doc)}")
+        print()
+    if codex_nested:
+        print("Codex: nested docs, loaded with their ancestors when working inside that directory")
+        for doc, size, tokens in codex_nested:
+            totals[f"the Codex chain ending at {lint.show(doc)}"] = tokens
+            print(f"  {tokens:>7}  chain ending at {lint.show(doc)} ({size} bytes)")
         print()
 
-    for f in claude:
+    plugin_skills = list(lint.root.glob("plugins/*/skills/*/SKILL.md"))
+    if plugin_skills:
+        lint.note("info", f"{len(plugin_skills)} plugin skill(s) under plugins/ are not counted: they load only "
+                          "where the plugin is installed (see `wb.py budget`)")
+    for f in all_claude.values():
         if f.lines > CLAUDE_MAX_LINES and f.scope == "project":
             lint.note("warn", f"{lint.show(f.path)}: {f.lines} lines (Claude Code suggests under {CLAUDE_MAX_LINES})")
-    for doc, size in [(f.path, lint.chain_bytes(lint.root)) for f in codex if f.scope == "project"] + nested:
+    root_chain = [(f.path, lint.chain_bytes(lint.root)) for f in codex if f.scope == "project"]
+    for doc, size in root_chain + [(doc, size) for doc, size, _ in codex_nested]:
         if size > CODEX_DOC_MAX_BYTES:
             lint.note("ERROR", f"{lint.show(doc)}: the Codex doc chain is {size} bytes; Codex stops reading at "
                                f"{CODEX_DOC_MAX_BYTES} (project_doc_max_bytes), so the rest is cut off")
@@ -486,11 +530,10 @@ def cmd_lint(args) -> int:
             if lvl == level:
                 print(f"{level:<5} {msg}")
     errors = sum(1 for lvl, _ in lint.notes if lvl == "ERROR")
-    if args.max_tokens is not None and max(claude_total, codex_total) > args.max_tokens:
-        print(f"FAIL  project instructions cost ~{max(claude_total, codex_total)} tokens per session "
-              f"(--max-tokens {args.max_tokens})")
-        return 1
-    return 1 if errors else 0
+    over = {name: t for name, t in totals.items() if args.max_tokens is not None and t > args.max_tokens}
+    for name, tokens in over.items():
+        print(f"FAIL  {name} costs ~{tokens} tokens of project instructions per session (--max-tokens {args.max_tokens})")
+    return 1 if errors or over else 0
 
 
 # ---------- link / unlink ----------

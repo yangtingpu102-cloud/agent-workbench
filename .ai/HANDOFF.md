@@ -2,14 +2,15 @@
 ## Goal
 Ship opportunity #2: `wb.py lint`, a cross-host token-budget linter for CLAUDE.md, AGENTS.md and skill metadata.
 ## State
-done: implemented and committed on feat/budget-linter; not pushed, not cross-reviewed yet.
+done: implemented, cross-reviewed by Codex, fixes committed; PR open against main.
 ## Done
 - `wb.py lint [PATH] [--no-global] [--max-tokens N] [--exact]` (evidence: `python -m unittest discover -s tests` → 13 tests OK)
 - Follows Claude @imports (depth 5, skips code spans and emails), Codex root-to-leaf doc chain with the 32 KiB cap, duplicate paragraphs, CLAUDE.md/AGENTS.md drift, CJK note (evidence: realistic temp fixture → expected tables)
 - `--exact` uses the optional `anthropic` SDK and falls back to estimates (evidence: run without the package → "skipped" warning, exit 0)
+- Codex cross-review: 5 findings; fixed nested CLAUDE.md chains, --max-tokens on every chain, --exact mid-run fallback, line counting; plugin skills stay out of lint totals (that is `wb.py budget`) with an info pointer (evidence: 18 tests OK)
 - CI runs the unit tests and `lint --no-global --max-tokens 3000`
 ## Next
-1. Codex cross-review of this branch (implementer is not the verifier), then push and open a PR
+1. Merge the PR once CI passes on Ubuntu and Windows
 2. Live-test `--exact` with credentials: `uv run --with anthropic python scripts/wb.py lint --exact`
 3. Codex → Claude cross-review from inside Codex (board T2)
 ## Files
