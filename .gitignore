@@ -1,0 +1,4 @@
+.ai/reviews/
+__pycache__/
+*.pyc
+.venv/

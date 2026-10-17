@@ -1,0 +1,22 @@
+{
+  "name": "workbench-core",
+  "version": "0.1.0",
+  "description": "Cross-agent handoff and read-only cross-review between Claude Code and Codex.",
+  "author": {
+    "name": "wayne yan"
+  },
+  "license": "MIT",
+  "keywords": ["handoff", "multi-agent", "code-review", "claude-code", "token-efficiency"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Workbench Core",
+    "shortDescription": "Hand off work and cross-review with Claude Code",
+    "developerName": "wayne yan",
+    "category": "Developer Tools",
+    "capabilities": ["Read"],
+    "defaultPrompt": [
+      "Write a handoff so another agent can continue",
+      "Get a cross-review of my uncommitted changes"
+    ]
+  }
+}

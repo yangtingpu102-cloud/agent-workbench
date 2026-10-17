@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""Ask the other coding agent (Codex <-> Claude Code) for a read-only review.
+
+  python ask_peer.py --goal "what the change is for"         # uncommitted diff
+  python ask_peer.py --base main --goal "..."                # diff against a branch
+  python ask_peer.py --question "why does X fail?" --files a.py b.py
+
+Prints the peer's verdict and saves it under .ai/reviews/. Stdlib only.
+Exit codes: 0 ok, 1 peer failed, 2 peer CLI not found, 3 nothing to review.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import glob
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+REVIEW_FORMAT = """Reply in exactly this format and nothing else:
+FINDINGS (at most 8, most severe first; write "none" if there are none):
+- [high|med|low] path:line — problem — why it matters — fix
+VERDICT: ship | fix-first | rethink
+CONFIDENCE: high | med | low"""
+
+ANSWER_FORMAT = """Reply in exactly this format and nothing else:
+ANSWER: at most 15 lines, concrete, naming files and lines where relevant
+CONFIDENCE: high | med | low"""
+
+PRINT_LINES = 60
+
+
+def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", **kw)
+
+
+class UsageError(Exception):
+    pass
+
+
+def git_ok(*args: str) -> tuple[bool, str]:
+    try:
+        r = run(["git", *args])
+    except FileNotFoundError:
+        return False, ""
+    return r.returncode == 0, r.stdout
+
+
+def git(*args: str) -> str:
+    ok, out = git_ok(*args)
+    return out if ok else ""
+
+
+def truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n[truncated {len(text) - limit} chars; read the files yourself if you need more]"
+
+
+def first_file(candidates: list[str | None]) -> str | None:
+    return next((c for c in candidates if c and os.path.isfile(c)), None)
+
+
+def find_codex() -> str | None:
+    cands = [os.environ.get("WB_CODEX_BIN"), shutil.which("codex")]
+    local = os.environ.get("LOCALAPPDATA")
+    if local:  # Codex desktop app on Windows ships the CLI here; the hash dir changes on update.
+        pattern = os.path.join(local, "OpenAI", "Codex", "bin", "*", "codex.exe")
+        cands += sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+    cands.append("/Applications/Codex.app/Contents/Resources/codex")
+    return first_file(cands)
+
+
+def find_claude() -> str | None:
+    exe = "claude.exe" if os.name == "nt" else "claude"
+    return first_file([os.environ.get("WB_CLAUDE_BIN"), shutil.which("claude"), str(Path.home() / ".local" / "bin" / exe)])
+
+
+def build_context(args) -> tuple[str, str]:
+    if args.question:
+        parts = [f"QUESTION: {args.question}"]
+        for f in args.files or []:
+            text = Path(f).read_text(encoding="utf-8", errors="replace")
+            parts.append(f"--- FILE {f} ---\n{text}")
+        return "\n\n".join(parts), ANSWER_FORMAT
+    if args.base:
+        ok, diff = git_ok("diff", args.base)
+        if not ok:
+            raise UsageError(f"git diff {args.base} failed: is '{args.base}' a valid ref?")
+    else:
+        diff = git("diff", "HEAD") or (git("diff", "--cached") + git("diff"))  # no HEAD yet in a new repo
+    untracked = [p for p in git("ls-files", "-z", "--others", "--exclude-standard").split("\0") if p]
+    if not diff.strip() and not untracked:
+        return "", ""
+    head = f"GOAL OF THE CHANGE: {args.goal or '(not given)'}"
+    tail = "UNTRACKED FILES (read them if relevant):\n" + "\n".join(untracked[:50]) if untracked else ""
+    # Truncate only the diff so the goal and the untracked list always reach the peer.
+    diff = truncate(diff or "(no tracked changes)", max(1000, args.max_chars - len(head) - len(tail) - 200))
+    return "\n".join(p for p in (head, "--- DIFF ---", diff, tail) if p), REVIEW_FORMAT
+
+
+def build_prompt(context: str, fmt: str, max_chars: int) -> str:
+    context = truncate(context, max_chars)
+    return (
+        "You are a senior engineer giving a second opinion to another coding agent.\n"
+        "Read-only: do not modify any file. Read files in the working directory only when the "
+        "context below is not enough, and do not explore unrelated code.\n\n"
+        f"{context}\n\n{fmt}\n"
+    )
+
+
+def peer_command(peer: str, binary: str, model: str | None, out_file: str) -> list[str]:
+    if peer == "codex":
+        cmd = [binary, "exec", "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check", "-o", out_file]
+        if model:
+            cmd += ["-m", model]
+        return cmd + ["-"]  # prompt on stdin: avoids the Windows command-line length limit
+    cmd = [binary, "-p", "--tools", "Read,Grep,Glob", "--permission-mode", "dontAsk",
+           "--no-session-persistence", "--output-format", "text"]
+    if model:
+        cmd += ["--model", model]
+    return cmd
+
+
+def save_review(root: Path, peer: str, args, verdict: str) -> Path:
+    stamp = dt.datetime.now(dt.timezone.utc)
+    out_dir = root / ".ai" / "reviews"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{stamp:%Y%m%d-%H%M%S}-{peer}.md"
+    sha = git("rev-parse", "--short", "HEAD").strip() or "no-commit"
+    scope = f"question: {args.question}" if args.question else f"diff vs {args.base or 'HEAD (uncommitted)'}"
+    header = f"# Cross-review by {peer} — {stamp:%Y-%m-%d %H:%M} UTC @ {sha}\n- scope: {scope}\n- goal: {args.goal or '-'}\n\n"
+    path.write_text(header + verdict.strip() + "\n", encoding="utf-8")
+    return path
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--peer", choices=["auto", "codex", "claude"], default="auto")
+    ap.add_argument("--goal", help="one line: what the change is for")
+    ap.add_argument("--base", help="review the diff against this ref instead of uncommitted changes")
+    ap.add_argument("--question", help="ask a question instead of reviewing a diff")
+    ap.add_argument("--files", nargs="*", help="files to include with --question")
+    ap.add_argument("--model", help="model for the peer")
+    ap.add_argument("--max-chars", type=int, default=60000, help="cap on context sent (default 60000, about 15k tokens)")
+    ap.add_argument("--timeout", type=int, default=600, help="seconds (default 600)")
+    ap.add_argument("--dry-run", action="store_true", help="print the command and prompt size; do not call the peer")
+    args = ap.parse_args()
+
+    peer = args.peer if args.peer != "auto" else ("codex" if os.environ.get("CLAUDECODE") else "claude")
+    root = Path(git("rev-parse", "--show-toplevel").strip() or os.getcwd())
+
+    try:
+        context, fmt = build_context(args)
+    except UsageError as e:
+        print(e)
+        return 1
+    if not context:
+        print("Nothing to review: no diff and no untracked files. Use --base or --question.")
+        return 3
+    prompt = build_prompt(context, fmt, args.max_chars)
+
+    binary = find_codex() if peer == "codex" else find_claude()
+    if not binary and not args.dry_run:
+        var = "WB_CODEX_BIN" if peer == "codex" else "WB_CLAUDE_BIN"
+        print(f"{peer} CLI not found. Install it or set {var} to its full path.")
+        return 2
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out_file = os.path.join(tmp, "last.md")
+        cmd = peer_command(peer, binary or peer, args.model, out_file)
+        if args.dry_run:
+            print(f"peer: {peer}\nbinary: {binary or 'NOT FOUND'}\ncwd: {root}\ncommand: {' '.join(cmd)}")
+            print(f"prompt: {len(prompt)} chars (about {len(prompt) // 4} tokens if mostly ASCII)")
+            return 0
+        try:
+            r = run(cmd, input=prompt, cwd=root, timeout=args.timeout)
+        except subprocess.TimeoutExpired:
+            print(f"{peer} timed out after {args.timeout}s.")
+            return 1
+        verdict = Path(out_file).read_text(encoding="utf-8", errors="replace") if os.path.isfile(out_file) else r.stdout
+        if r.returncode != 0 or not verdict.strip():
+            print(f"{peer} failed (exit {r.returncode}). Last stderr lines:")
+            print("\n".join(r.stderr.strip().splitlines()[-15:]))
+            return 1
+
+    path = save_review(root, peer, args, verdict)
+    lines = verdict.strip().splitlines()
+    print("\n".join(lines[:PRINT_LINES]))
+    if len(lines) > PRINT_LINES:
+        print(f"[{len(lines) - PRINT_LINES} more lines in the saved review]")
+    print(f"\nsaved: {path.relative_to(root).as_posix()}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

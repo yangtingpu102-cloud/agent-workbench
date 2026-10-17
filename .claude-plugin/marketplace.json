@@ -1,0 +1,14 @@
+{
+  "name": "agent-workbench",
+  "owner": {
+    "name": "wayne yan"
+  },
+  "description": "Skills for cheaper, smoother Claude Code and Codex sessions and for multi-agent collaboration.",
+  "plugins": [
+    {
+      "name": "workbench-core",
+      "source": "./plugins/workbench-core",
+      "description": "Cross-agent handoff and read-only cross-review between Claude Code and Codex."
+    }
+  ]
+}

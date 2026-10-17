@@ -1,0 +1,35 @@
+name: validate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate skills, manifests and marketplaces
+        run: python scripts/wb.py validate
+      - name: Per-session token budget
+        run: python scripts/wb.py budget --max 1500
+      - name: Cross-review helper dry run
+        run: python plugins/workbench-core/skills/cross-review/scripts/ask_peer.py --peer codex --question "smoke test" --dry-run
+
+  claude-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Claude Code
+        run: curl -fsSL https://claude.ai/install.sh | bash
+      - name: claude plugin validate
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          claude plugin validate . --strict
+          for p in plugins/*/; do claude plugin validate "$p" --strict; done

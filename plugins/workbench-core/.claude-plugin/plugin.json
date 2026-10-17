@@ -1,0 +1,11 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "workbench-core",
+  "version": "0.1.0",
+  "description": "Cross-agent handoff and read-only cross-review between Claude Code and Codex.",
+  "author": {
+    "name": "wayne yan"
+  },
+  "license": "MIT",
+  "keywords": ["handoff", "multi-agent", "code-review", "codex", "token-efficiency"]
+}
