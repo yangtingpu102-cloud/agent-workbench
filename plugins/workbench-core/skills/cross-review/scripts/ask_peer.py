@@ -98,10 +98,14 @@ def build_context(args) -> tuple[str, str, bool | None]:
             text = Path(f).read_text(encoding="utf-8", errors="replace")
             parts.append(f"--- FILE {f} ---\n{text}")
         return "\n\n".join(parts), ANSWER_FORMAT, None
-    if args.base:
-        ok, diff = git_ok("diff", args.base)
+    if args.base:  # diff from where the branch left the base, so later base commits do not leak in
+        ok, merge_base = git_ok("merge-base", args.base, "HEAD")
+        if not ok or not merge_base.strip():
+            raise UsageError(f"no merge base with '{args.base}': is it a valid ref?")
+        args.review_base = merge_base.strip()
+        ok, diff = git_ok("diff", args.review_base)
         if not ok:
-            raise UsageError(f"git diff {args.base} failed: is '{args.base}' a valid ref?")
+            raise UsageError(f"git diff {args.review_base} failed")
     else:
         diff = git("diff", "HEAD") or (git("diff", "--cached") + git("diff"))  # no HEAD yet in a new repo
     untracked = [p for p in git("ls-files", "-z", "--others", "--exclude-standard").split("\0") if p]
@@ -209,7 +213,7 @@ def save_review(root: Path, peer: str, author: str, cid: str | None, complete: b
               f"- scope: {scope}\n- goal: {args.goal or '-'}\n- content: {cid or 'unknown'}\n\n")
     path.write_text(header + reply.strip() + "\n", encoding="utf-8")
     verdict, confidence, findings = parse_verdict(reply) if not args.question else (None, None, 0)
-    base_sha = None if args.question else (git("rev-parse", args.base).strip() if args.base else sha) or None
+    base_sha = None if args.question else (getattr(args, "review_base", None) if args.base else sha) or None
     record = {"id": uuid.uuid4().hex, "at": f"{stamp:%Y-%m-%dT%H:%M:%S.%fZ}", "peer": peer, "author": author,
               "content": cid, "complete": complete, "head": sha or None, "base_sha": base_sha, "scope": scope,
               "goal": args.goal, "verdict": verdict,

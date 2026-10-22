@@ -321,6 +321,38 @@ class AskPeerContextTest(unittest.TestCase):
         finally:
             os.chdir(old)
 
+    def test_base_review_diffs_from_the_merge_base(self):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        repo = Path(tmp.name)
+        git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+        run = lambda *a: subprocess.run(git + list(a), check=True, capture_output=True, text=True).stdout.strip()
+        run("init", "-q", "-b", "main")
+        (repo / "a.py").write_text("a = 1\n", encoding="utf-8")
+        run("add", "-A")
+        run("commit", "-q", "-m", "A")
+        fork = run("rev-parse", "HEAD")
+        run("switch", "-q", "-c", "feature")
+        (repo / "feature.py").write_text("print('feature change')\n", encoding="utf-8")
+        run("add", "-A")
+        run("commit", "-q", "-m", "B")
+        run("switch", "-q", "main")
+        (repo / "later.py").write_text("print('main moved on')\n", encoding="utf-8")
+        run("add", "-A")
+        run("commit", "-q", "-m", "C")
+        run("switch", "-q", "feature")
+        args = type("Args", (), {"question": None, "base": "main", "goal": "g", "max_chars": 60000})()
+        old = os.getcwd()
+        os.chdir(repo)
+        try:
+            context, _, complete = ask_peer.build_context(args)
+        finally:
+            os.chdir(old)
+        self.assertIn("feature change", context)
+        self.assertNotIn("main moved on", context)
+        self.assertEqual(args.review_base, fork)
+        self.assertTrue(complete)
+
     def test_a_tracked_binary_change_marks_the_review_incomplete(self):
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(tmp.cleanup)
