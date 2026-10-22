@@ -10,7 +10,7 @@ Runs the same task headless in fresh workspaces under two or more configurations
 
 ## Steps
 1. Write an experiment JSON. Start from `<skill-dir>/examples/experiments/`. It needs:
-   - one task: an optional fixture directory, the prompt, and a check command that decides success;
+   - one task: an optional fixture directory, the prompt, and what decides success: a `check` command run in the workspace, and/or `expect`, text the final answer must contain. Without either, runs only count as completed;
    - two or more arms that differ in exactly one thing: `claude_args`, `codex_args`, `files`, `files_from` or `env`;
    - the hosts and the number of runs.
 2. Show the plan: `python <skill-dir>/scripts/bench.py plan <experiment.json>`. Tell the user how many agent runs it means and that each one spends quota or money. Get their go-ahead and a budget before running.
