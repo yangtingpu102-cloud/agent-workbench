@@ -45,11 +45,13 @@ class VerifyTest(unittest.TestCase):
 
     def commit(self, message: str) -> None:
         self.git("add", "-A")
-        self.git("commit", "-q", "-m", message)
+        self.git("commit", "-q", "--allow-empty", "-m", message)
 
-    def config(self, runs: list[str], require_review: bool = False) -> None:
+    def config(self, runs: list[str], require_review: bool = False, commit: bool = False) -> None:
         checks = [{"name": f"check {i}", "run": run} for i, run in enumerate(runs)]
         self.write(".ai/verify.json", json.dumps({"checks": checks, "require_review": require_review}))
+        if commit:
+            self.commit("config")
 
     def verify(self, *args: str) -> tuple[int, str]:
         r = subprocess.run([sys.executable, str(VERIFY), *args], cwd=self.repo, capture_output=True, text=True,
@@ -59,23 +61,28 @@ class VerifyTest(unittest.TestCase):
     def cid(self) -> str:
         return self.verify("content")[1].strip()
 
-    def add_review(self, verdict: str, peer: str = "codex", author: str = "claude", at: str = "2026-01-01T00:00:00Z"):
+    def evidence_path(self) -> Path:
+        return self.repo / ".ai" / "verifications" / f"{self.cid()}.json"
+
+    def add_review(self, verdict: str, at: str, peer: str = "codex", author: str = "claude",
+                   base_sha: str | None = None) -> None:
         record = {"at": at, "peer": peer, "author": author, "content": self.cid(), "verdict": verdict,
-                  "confidence": "high", "findings": 0}
+                  "confidence": "high", "findings": 0, "base_sha": base_sha}
         self.write(f".ai/reviews/{at.replace(':', '')}-{peer}.json", json.dumps(record))
 
-    def test_content_id_is_stable_across_commit_and_ignores_ai_dir(self):
+    def test_content_id_ignores_coordination_files_but_not_the_check_config(self):
         self.write("app.py", "x = 2\n")
         before = self.cid()
         self.write(".ai/board.md", "board changes do not count\n")
         self.assertEqual(self.cid(), before)
         self.commit("change")
         self.assertEqual(self.verify("content", "--rev", "HEAD")[1].strip(), before)
-        self.write("app.py", "x = 3\n")
+        self.config([])
         self.assertNotEqual(self.cid(), before)
 
     def test_cross_review_and_verify_compute_the_same_content_id(self):
         self.write("new.py", "y = 1\n")
+        self.write(".ai/board.md", "ignored\n")
         old = os.getcwd()
         os.chdir(self.repo)
         try:
@@ -86,23 +93,27 @@ class VerifyTest(unittest.TestCase):
     def test_run_records_passing_checks(self):
         code, out = self.verify("run", "--host", "claude")
         self.assertEqual(code, 0, out)
-        evidence = json.loads((self.repo / ".ai" / "verifications" / f"{self.cid()}.json").read_text(encoding="utf-8"))
+        evidence = json.loads(self.evidence_path().read_text(encoding="utf-8"))
         check = evidence["runs"][0]["checks"][0]
-        self.assertEqual(check["exit"], 0)
-        self.assertEqual(len(check["output_sha256"]), 64)
-        self.assertEqual(evidence["runs"][0]["host"], "claude")
+        self.assertEqual((check["exit"], len(check["output_sha256"]), evidence["runs"][0]["host"]), (0, 64, "claude"))
 
     def test_run_records_a_failing_check(self):
-        self.config([PASS, FAIL])
+        self.config([PASS, FAIL], commit=True)
         code, out = self.verify("run", "--host", "claude")
         self.assertEqual(code, 1, out)
         self.assertIn("FAIL  check 1", out)
-        evidence = json.loads((self.repo / ".ai" / "verifications" / f"{self.cid()}.json").read_text(encoding="utf-8"))
+        evidence = json.loads(self.evidence_path().read_text(encoding="utf-8"))
         self.assertFalse(evidence["runs"][0]["passed"])
         self.assertIn("boom", evidence["runs"][0]["checks"][1]["tail"])
 
+    def test_run_requires_a_clean_tree(self):
+        self.write("app.py", "x = 2\n")
+        code, out = self.verify("run", "--host", "claude")
+        self.assertEqual(code, 2)
+        self.assertIn("commit the change first", out)
+
     def test_run_refuses_checks_that_change_the_content(self):
-        self.config(["python -c \"open('app.py', 'w').write('changed')\""])
+        self.config(["python -c \"open('app.py', 'w').write('changed')\""], commit=True)
         code, out = self.verify("run", "--host", "claude")
         self.assertEqual(code, 2)
         self.assertIn("content changed while the checks ran", out)
@@ -113,23 +124,88 @@ class VerifyTest(unittest.TestCase):
         self.assertIn("no evidence", out)
 
     def test_gate_passes_with_a_run_and_a_ship_review_by_the_other_agent(self):
-        self.config([PASS], require_review=True)
-        self.add_review("ship")
+        self.config([PASS], require_review=True, commit=True)
+        self.add_review("ship", "2026-01-01T00:00:01Z")
         self.assertEqual(self.verify("run", "--host", "claude")[0], 0)
-        self.commit("change with evidence")
+        self.commit("evidence")
         code, out = self.verify("gate")
         self.assertEqual(code, 0, out)
-        self.assertIn("review: ship by codex (author claude)", out)
+        self.assertIn("ship by codex (author claude)", out)
 
-    def test_gate_rejects_self_review_and_non_ship_verdicts(self):
-        self.config([PASS], require_review=True)
-        self.add_review("ship", peer="claude", author="claude", at="2026-01-01T00:00:01Z")
-        self.add_review("fix-first", at="2026-01-01T00:00:02Z")
+    def test_gate_uses_the_latest_independent_review(self):
+        self.config([PASS], require_review=True, commit=True)
+        self.add_review("ship", "2026-01-01T00:00:01Z")
+        self.add_review("fix-first", "2026-01-01T00:00:02Z")
+        self.add_review("ship", "2026-01-01T00:00:03Z", peer="claude", author="claude")  # self-review: ignored
         self.verify("run", "--host", "claude")
         self.commit("evidence")
         code, out = self.verify("gate")
         self.assertEqual(code, 1)
-        self.assertIn("found: ship by claude, fix-first by codex", out)
+        self.assertIn("says fix-first", out)
+
+    def test_gate_uses_the_latest_run(self):
+        self.verify("run", "--host", "claude")
+        path = self.evidence_path()
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+        failed = dict(evidence["runs"][0], at="2999-01-01T00:00:00Z", platform="linux", passed=False)
+        evidence["runs"].append(failed)
+        path.write_text(json.dumps(evidence), encoding="utf-8")
+        self.commit("evidence")
+        code, out = self.verify("gate")
+        self.assertEqual(code, 1)
+        self.assertIn("the latest run", out)
+
+    def test_weakening_the_checks_invalidates_old_evidence(self):
+        self.config([PASS, FAIL], commit=True)
+        self.verify("run", "--host", "claude")
+        self.commit("failing evidence")
+        self.config([PASS], commit=True)  # dropping the failing check changes the content id
+        code, out = self.verify("gate")
+        self.assertEqual(code, 1)
+        self.assertIn("no evidence", out)
+
+    def test_evidence_saved_under_another_content_name_is_rejected(self):
+        self.verify("run", "--host", "claude")
+        old = self.evidence_path()
+        self.commit("evidence")
+        self.write("app.py", "x = 3\n")
+        self.commit("change")
+        self.evidence_path().write_text(old.read_text(encoding="utf-8"), encoding="utf-8")
+        self.commit("copied evidence")
+        code, out = self.verify("gate")
+        self.assertEqual(code, 1)
+        self.assertIn("records content", out)
+
+    def test_ship_review_must_cover_the_whole_change_with_base(self):
+        self.config([PASS], require_review=True, commit=True)
+        main_sha = self.git("rev-parse", "HEAD")
+        self.git("switch", "-q", "-c", "feature")
+        self.write("app.py", "x = 2\n")
+        self.commit("part 1")
+        part1 = self.git("rev-parse", "HEAD")
+        self.write("app.py", "x = 3\n")
+        self.commit("part 2")
+        self.add_review("ship", "2026-01-01T00:00:01Z", base_sha=part1)  # saw only part 2
+        self.verify("run", "--host", "claude")
+        self.commit("evidence")
+        code, out = self.verify("gate", "--base", "main")
+        self.assertEqual(code, 1)
+        self.assertIn("does not cover", out)
+        self.add_review("ship", "2026-01-01T00:00:02Z", base_sha=main_sha)
+        self.verify("collect")
+        self.commit("full review")
+        code, out = self.verify("gate", "--base", "main")
+        self.assertEqual(code, 0, out)
+
+    def test_collect_attaches_a_later_review_without_rerunning(self):
+        self.config([PASS], require_review=True, commit=True)
+        self.verify("run", "--host", "claude")
+        self.add_review("ship", "2026-01-01T00:00:01Z")
+        code, out = self.verify("collect")
+        self.assertEqual(code, 0, out)
+        self.assertIn("added 1 review", out)
+        self.commit("evidence")
+        self.assertEqual(self.verify("gate")[0], 0)
 
     def test_code_change_after_evidence_blocks_the_gate(self):
         self.verify("run", "--host", "claude")
@@ -140,16 +216,6 @@ class VerifyTest(unittest.TestCase):
         code, out = self.verify("gate")
         self.assertEqual(code, 1)
         self.assertIn("no evidence", out)
-
-    def test_collect_attaches_a_later_review_without_rerunning(self):
-        self.config([PASS], require_review=True)
-        self.verify("run", "--host", "claude")
-        self.add_review("ship")
-        code, out = self.verify("collect")
-        self.assertEqual(code, 0, out)
-        self.assertIn("added 1 review", out)
-        self.commit("evidence")
-        self.assertEqual(self.verify("gate")[0], 0)
 
 
 class ParseVerdictTest(unittest.TestCase):

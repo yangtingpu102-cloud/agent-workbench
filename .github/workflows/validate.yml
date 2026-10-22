@@ -33,11 +33,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Evidence gate (checks passed and a ship review by the other agent)
-        run: python plugins/workbench-core/skills/verify/scripts/verify.py gate
+      - name: Evidence gate (latest run passed, ship review by the other agent covering the PR)
+        run: python plugins/workbench-core/skills/verify/scripts/verify.py gate --base ${{ github.event.pull_request.base.sha }}
 
   claude-validate:
     runs-on: ubuntu-latest

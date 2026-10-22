@@ -4,15 +4,16 @@
   python verify.py run --host claude|codex|human   run the checks in .ai/verify.json, then record exit codes,
                                                    timings and output hashes for the current content
   python verify.py collect                         add matching cross-review records without running checks
-  python verify.py gate [--rev REV]                exit 1 unless REV's content has a passing run and, when
-                                                   required, a "ship" review by an agent other than its author
+  python verify.py gate [--rev REV] [--base REF]   exit 1 unless REV's latest run passed and, when required,
+                                                   its latest review by another agent says "ship" (and, with
+                                                   --base, covers the whole change since REF)
   python verify.py show [--rev REV]                print the evidence for that content
   python verify.py content [--rev REV]             print the content id
 
-The content id is the git tree of everything except .ai/ (coordination state). It is computed the same
-way for an uncommitted working tree and for a commit, so evidence gathered before committing still
-matches the commit, and any later code change invalidates it. Evidence lives in
-.ai/verifications/<content id>.json and is meant to be committed with the change.
+The content id is the git tree of everything except .ai/ (coordination state), keeping .ai/verify.json so
+that weakening the checks invalidates old evidence. It is computed the same way for a working tree and
+for a commit. `run` requires a clean tree, so evidence always describes a commit; any later change to
+code or checks invalidates it. Evidence lives in .ai/verifications/<content id>.json and is committed.
 """
 from __future__ import annotations
 
@@ -81,8 +82,15 @@ def content_id(top: Path, rev: str | None = None) -> str:
             git(top, "read-tree", "--empty", env=env)
         if rev is None:
             git(top, "add", "-A", env=env)  # the working tree as it would be committed (.gitignore applies)
-        git(top, "rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", EXCLUDE, env=env)
+        git(top, "rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", EXCLUDE, f":(exclude){CONFIG}", env=env)
         return git(top, "write-tree", env=env)
+
+
+def uncommitted(top: Path) -> list[str]:
+    """Changes that would make the working tree differ from HEAD's content (ignoring .ai/ except the config)."""
+    lines = git(top, "status", "--porcelain", "--", ".", f":(exclude){EXCLUDE}", check=False).splitlines()
+    lines += git(top, "status", "--porcelain", "--", CONFIG, check=False).splitlines()
+    return [line for line in lines if line.strip()]
 
 
 def read_file(top: Path, rel: str, rev: str | None) -> str | None:
@@ -142,21 +150,26 @@ def merge_reviews(evidence: dict, reviews: list[dict]) -> int:
 def run_check(top: Path, check: dict) -> dict:
     start = time.monotonic()
     try:
-        r = subprocess.run(check["run"], shell=True, cwd=top, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=check.get("timeout", DEFAULT_TIMEOUT))
-        code, output = r.returncode, r.stdout + r.stderr
+        r = subprocess.run(check["run"], shell=True, cwd=top, capture_output=True,
+                           timeout=check.get("timeout", DEFAULT_TIMEOUT))
+        code, raw = r.returncode, r.stdout + r.stderr
     except subprocess.TimeoutExpired:
-        code, output = None, f"timed out after {check.get('timeout', DEFAULT_TIMEOUT)}s"
+        code, raw = None, f"timed out after {check.get('timeout', DEFAULT_TIMEOUT)}s".encode()
+    text = raw.decode("utf-8", errors="replace")
     return {"name": check["name"], "run": check["run"], "exit": code,
             "seconds": round(time.monotonic() - start, 1),
-            "output_sha256": hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "tail": output.strip().splitlines()[-TAIL_LINES:]}
+            "output_sha256": hashlib.sha256(raw).hexdigest(),  # the exact bytes, before any newline handling
+            "tail": text.strip().splitlines()[-TAIL_LINES:]}
 
 
 # ---------- commands ----------
 
 def cmd_run(args) -> int:
     top = repo_top()
+    dirty = uncommitted(top)
+    if dirty:
+        raise VerifyError("commit the change first, so the evidence describes exactly what is committed. "
+                          f"Uncommitted: {', '.join(line[3:] for line in dirty[:5])}")
     cid = content_id(top)
     config = load_config(top, None)
     if not config["checks"]:
@@ -169,10 +182,9 @@ def cmd_run(args) -> int:
               f"({result['seconds']}s, exit {result['exit']})")
     if content_id(top) != cid:
         raise VerifyError("the content changed while the checks ran (a check wrote files?); fix that and run again")
-    status = git(top, "status", "--porcelain", "--", ".", f":(exclude){EXCLUDE}", check=False)
     run = {"at": now(), "host": args.host, "head": git(top, "rev-parse", "HEAD", check=False) or None,
            "branch": git(top, "rev-parse", "--abbrev-ref", "HEAD", check=False) or None,
-           "uncommitted": bool(status), "platform": sys.platform, "python": platform.python_version(),
+           "platform": sys.platform, "python": platform.python_version(),
            "checks": results, "passed": all(r["exit"] == 0 for r in results)}
     evidence = load_evidence(top, cid) or {"content": cid, "runs": [], "reviews": []}
     evidence["runs"].append(run)
@@ -193,18 +205,51 @@ def cmd_collect(_args) -> int:
     return 0
 
 
-def shipping_reviews(evidence: dict) -> list[dict]:
-    return [r for r in evidence.get("reviews", [])
-            if r.get("verdict") == "ship" and r.get("peer") and r.get("peer") != r.get("author")]
+def latest(items: list[dict]) -> dict | None:
+    return max(items, key=lambda item: item.get("at") or "", default=None)
 
 
-def passing_runs(evidence: dict, required: list[str]) -> list[dict]:
-    good = []
-    for run in evidence.get("runs", []):
-        passed = {c["name"] for c in run.get("checks", []) if c.get("exit") == 0}
-        if run.get("passed") and set(required) <= passed:
-            good.append(run)
-    return good
+def is_ancestor(top: Path, older: str, newer: str) -> bool:
+    return subprocess.run(["git", "-C", str(top), "merge-base", "--is-ancestor", older, newer],
+                          capture_output=True).returncode == 0
+
+
+def check_run(evidence: dict, required: list[str]) -> str | None:
+    """The latest run decides: an older pass does not outweigh a newer failure."""
+    run = latest(evidence.get("runs", []))
+    if not run:
+        return f"no recorded run of the required checks ({', '.join(required) or 'none configured'})"
+    passed = {c["name"] for c in run.get("checks", []) if c.get("exit") == 0}
+    missing = [name for name in required if name not in passed]
+    if not run.get("passed") or missing:
+        return (f"the latest run ({run.get('host')} on {run.get('platform')} at {run.get('at')}) did not pass"
+                + (f": {', '.join(missing)}" if missing else ""))
+    print(f"ok    latest run passed {', '.join(required) or '(no checks required)'} "
+          f"({run.get('host')} on {run.get('platform')} at {run.get('at')})")
+    return None
+
+
+def check_review(top: Path, evidence: dict, cid: str, rev: str, base: str | None) -> str | None:
+    """The latest review by an agent other than the author decides, and with --base it must cover the change."""
+    independent = [r for r in evidence.get("reviews", [])
+                   if r.get("content") == cid and r.get("peer") and r.get("peer") != r.get("author")]
+    review = latest(independent)
+    if not review:
+        found = [f"{r.get('verdict')} by {r.get('peer')} for {r.get('author')}" for r in evidence.get("reviews", [])]
+        return ("no review of this content by an agent other than its author"
+                + (f" (found: {', '.join(found)})" if found else "") + ". Run cross-review, then `verify.py collect`")
+    if review.get("verdict") != "ship":
+        return (f"the latest independent review ({review.get('peer')} at {review.get('at')}) says "
+                f"{review.get('verdict')}. Fix the findings, review again until ship, then `verify.py collect`")
+    if base:
+        merge_base = git(top, "merge-base", base, rev, check=False)
+        reviewed_from = review.get("base_sha")
+        if not merge_base or not reviewed_from or not is_ancestor(top, reviewed_from, merge_base):
+            return (f"the ship review compared against {reviewed_from or 'an unknown base'}, which does not cover "
+                    f"the whole change since {base}. Review again with `--base {base}`")
+    print(f"ok    latest independent review: ship by {review.get('peer')} (author {review.get('author')}) "
+          f"at {review.get('at')}" + ("" if base else "; coverage not checked (pass --base)"))
+    return None
 
 
 def cmd_gate(args) -> int:
@@ -217,26 +262,15 @@ def cmd_gate(args) -> int:
     print(f"content {cid[:12]} at {rev}")
     problems = []
     if not evidence:
-        problems.append(f"no evidence for this content. Run `verify.py run --host <you>` after the last change "
+        problems.append(f"no evidence for this content. Commit the change, run `verify.py run --host <you>`, "
                         f"and commit {EVIDENCE_DIR}/")
+    elif evidence.get("content") != cid:
+        problems.append(f"{evidence_rel(cid)} records content {evidence.get('content')}, not {cid}")
     else:
-        runs = passing_runs(evidence, required)
-        if runs:
-            last = runs[-1]
-            print(f"ok    checks passed: {', '.join(required) or '(none required)'} "
-                  f"(run by {last.get('host')} on {last.get('platform')} at {last.get('at')})")
-        else:
-            problems.append(f"no run where every required check passed ({', '.join(required)})")
+        problems.append(check_run(evidence, required))
         if config["require_review"]:
-            ships = shipping_reviews(evidence)
-            if ships:
-                r = ships[-1]
-                print(f"ok    review: ship by {r.get('peer')} (author {r.get('author')}) at {r.get('at')}")
-            else:
-                verdicts = [f"{r.get('verdict')} by {r.get('peer')}" for r in evidence.get("reviews", [])]
-                problems.append("no 'ship' review of this exact content by an agent other than its author"
-                                + (f" (found: {', '.join(verdicts)})" if verdicts else "")
-                                + ". Run cross-review, fix the findings, re-review until ship, then `verify.py collect`")
+            problems.append(check_review(top, evidence, cid, rev, args.base))
+    problems = [p for p in problems if p]
     for problem in problems:
         print(f"FAIL  {problem}")
     print("PASS" if not problems else "BLOCKED")
@@ -274,6 +308,8 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("gate", "show", "content"):
         p = sub.add_parser(name)
         p.add_argument("--rev", help="commit to check (default: HEAD for gate, the working tree otherwise)")
+        if name == "gate":
+            p.add_argument("--base", help="the PR base: the ship review must cover every change since it")
     return ap
 
 

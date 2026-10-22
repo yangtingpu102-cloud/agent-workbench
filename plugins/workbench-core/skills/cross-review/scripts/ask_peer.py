@@ -132,13 +132,15 @@ def peer_command(peer: str, binary: str, model: str | None, out_file: str) -> li
 
 
 def content_id(root: Path) -> str | None:
-    """Tree id of the working tree without .ai/. Keep in sync with content_id() in verify/scripts/verify.py."""
+    """Tree id of the working tree without .ai/ (but with .ai/verify.json).
+    Keep in sync with content_id() in verify/scripts/verify.py."""
     with tempfile.TemporaryDirectory() as tmp:
         env = {**os.environ, "GIT_INDEX_FILE": os.path.join(tmp, "index")}
         start = ["read-tree", "HEAD"] if git("rev-parse", "--verify", "-q", "HEAD^{commit}").strip() \
             else ["read-tree", "--empty"]
         out = ""
-        for step in (start, ["add", "-A"], ["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", ".ai"],
+        for step in (start, ["add", "-A"],
+                     ["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", ".ai", ":(exclude).ai/verify.json"],
                      ["write-tree"]):
             r = run(["git", "-C", str(root), *step], env=env)
             if r.returncode != 0:
@@ -174,8 +176,9 @@ def save_review(root: Path, peer: str, author: str, cid: str | None, args, reply
               f"- scope: {scope}\n- goal: {args.goal or '-'}\n- content: {cid or 'unknown'}\n\n")
     path.write_text(header + reply.strip() + "\n", encoding="utf-8")
     verdict, confidence, findings = parse_verdict(reply) if not args.question else (None, None, 0)
+    base_sha = None if args.question else (git("rev-parse", args.base).strip() if args.base else sha) or None
     record = {"at": f"{stamp:%Y-%m-%dT%H:%M:%SZ}", "peer": peer, "author": author, "content": cid,
-              "head": sha or None, "scope": scope, "goal": args.goal, "verdict": verdict,
+              "head": sha or None, "base_sha": base_sha, "scope": scope, "goal": args.goal, "verdict": verdict,
               "confidence": confidence, "findings": findings, "review_file": path.name}
     json_path = path.with_suffix(".json")
     json_path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
