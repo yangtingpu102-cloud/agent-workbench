@@ -1,6 +1,6 @@
 {
   "name": "headless-overhead",
-  "description": "What a headless call costs before doing any work: the default setup versus one that skips MCP connectors, user settings and skills. Codex's --ignore-user-config also drops your configured model; the report lists the model per run.",
+  "description": "What a headless call costs before doing any work: the default setup versus one that skips MCP connectors, user settings and skills. Codex's --ignore-user-config may also change the model, which Codex does not report: pin it with \"-m\" in common.codex_args for a fair comparison.",
   "hosts": ["claude", "codex"],
   "runs": 3,
   "task": {

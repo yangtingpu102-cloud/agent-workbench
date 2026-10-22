@@ -65,6 +65,19 @@ class ParseTest(unittest.TestCase):
         self.assertFalse(failed["agent_ok"])
 
 
+class CodexModelTest(unittest.TestCase):
+    def test_model_comes_from_the_pinned_flag(self):
+        self.assertEqual(bench.codex_model(["codex", "exec", "-m", "gpt-x", "-"]), "gpt-x")
+        self.assertEqual(bench.codex_model(["codex", "exec", "--model", "gpt-y", "-"]), "gpt-y")
+        self.assertEqual(bench.codex_model(["codex", "exec", "-"]), "unpinned")
+
+    def test_report_warns_when_codex_model_is_not_pinned(self):
+        exp = {"name": "x", "arms": [{"name": "a"}]}
+        run = {"host": "codex", "arm": "a", "round": 0, "success": True, "cost_usd": None, "total_input": 10,
+               "cache_read": 0, "output": 1, "turns": 1, "seconds": 1.0, "model": "unpinned"}
+        self.assertIn("Pin it with `-m <model>`", bench.build_report([run], exp))
+
+
 class StatsTest(unittest.TestCase):
     def test_wilson(self):
         self.assertEqual(bench.wilson(0, 0), (0.0, 0.0))

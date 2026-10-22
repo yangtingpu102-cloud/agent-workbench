@@ -251,6 +251,14 @@ def agent_env(exp: dict, arm: dict) -> dict:
     return env
 
 
+def codex_model(cmd: list[str]) -> str:
+    """Codex's JSON events do not name the model, so record the one pinned on the command line, if any."""
+    for flag in ("-m", "--model"):
+        if flag in cmd[:-1]:
+            return cmd[cmd.index(flag) + 1]
+    return "unpinned"
+
+
 def run_one(exp: dict, host: str, arm: dict, rnd: int, binary: str, keep: bool) -> dict:
     task = exp["task"]
     workspace = prepare_workspace(exp, arm)
@@ -259,6 +267,8 @@ def run_one(exp: dict, host: str, arm: dict, rnd: int, binary: str, keep: bool) 
     code, stdout, stderr = execute(cmd, workspace, agent_env(exp, arm), task["prompt"], task.get("timeout", 600))
     seconds = round(time.monotonic() - start, 1)
     metrics = parse_claude(stdout) if host == "claude" else parse_codex(stdout, (exp.get("prices") or {}).get(host))
+    if host == "codex":
+        metrics["model"] = codex_model(cmd)
     check_exit = run_check(task.get("check"), workspace, task.get("timeout", 600))
     agent_ok = metrics.pop("agent_ok") and code == 0
     record = {"id": uuid.uuid4().hex, "at": now(), "experiment": exp["name"], "host": host, "arm": arm["name"],
@@ -417,6 +427,9 @@ def build_report(runs: list[dict], exp: dict, seed: int = 0) -> str:
                                           [float(r.get("total_input") or 0) for r in group], rng)
                 lines.append(f"| {name} | {fmt_ci(cost_ci, True) or 'n/a'} | {verdict(cost_ci)} | "
                              f"{fmt_ci(input_ci) or 'n/a'} | {verdict(input_ci)} |")
+        if host == "codex" and any(r.get("model") == "unpinned" for r in runs if r["host"] == host):
+            lines += ["", "Codex does not report its model. Pin it with `-m <model>` in `common.codex_args` so every "
+                          "arm uses the same one; otherwise an arm such as `--ignore-user-config` may change it."]
         failures = [r for r in runs if r["host"] == host and r.get("error")]
         if failures:
             lines += ["", "Errors: " + "; ".join(f"{r['arm']} round {r['round']}: {r['error']}" for r in failures[:5])]
