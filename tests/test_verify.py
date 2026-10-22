@@ -65,10 +65,11 @@ class VerifyTest(unittest.TestCase):
         return self.repo / ".ai" / "verifications" / f"{self.cid()}.json"
 
     def add_review(self, verdict: str, at: str, peer: str = "codex", author: str = "claude",
-                   base_sha: str | None = None) -> None:
-        record = {"at": at, "peer": peer, "author": author, "content": self.cid(), "verdict": verdict,
-                  "confidence": "high", "findings": 0, "base_sha": base_sha}
-        self.write(f".ai/reviews/{at.replace(':', '')}-{peer}.json", json.dumps(record))
+                   base_sha: str | None = None, complete: bool = True, rid: str | None = None) -> None:
+        record = {"id": rid or f"{at}-{peer}-{verdict}", "at": at, "peer": peer, "author": author,
+                  "content": self.cid(), "complete": complete, "verdict": verdict, "confidence": "high",
+                  "findings": 0, "base_sha": base_sha}
+        self.write(f".ai/reviews/{record['id'].replace(':', '')}.json", json.dumps(record))
 
     def test_content_id_ignores_coordination_files_but_not_the_check_config(self):
         self.write("app.py", "x = 2\n")
@@ -216,6 +217,71 @@ class VerifyTest(unittest.TestCase):
         code, out = self.verify("gate")
         self.assertEqual(code, 1)
         self.assertIn("no evidence", out)
+
+
+    def test_base_policy_cannot_be_loosened_by_the_pr(self):
+        self.config([PASS], require_review=True, commit=True)
+        self.git("switch", "-q", "-c", "loosen")
+        self.config([], require_review=False, commit=True)  # the PR drops its checks and review rule
+        self.verify("run", "--host", "claude")
+        self.commit("evidence")
+        self.assertEqual(self.verify("gate")[0], 0)  # without --base the PR's own rules apply
+        code, out = self.verify("gate", "--base", "main")
+        self.assertEqual(code, 1)
+        self.assertIn("did not pass: check 0", out)
+        self.assertIn("no review of this content", out)
+
+    def test_an_uncollected_newer_review_still_blocks_locally(self):
+        self.config([PASS], require_review=True, commit=True)
+        self.add_review("ship", "2026-01-01T00:00:01Z")
+        self.verify("run", "--host", "claude")
+        self.commit("evidence")
+        self.add_review("fix-first", "2026-01-01T00:00:02Z")  # saved by cross-review, never collected
+        code, out = self.verify("gate")
+        self.assertEqual(code, 1)
+        self.assertIn("says fix-first", out)
+
+    def test_an_incomplete_review_does_not_count(self):
+        self.config([PASS], require_review=True, commit=True)
+        self.add_review("ship", "2026-01-01T00:00:01Z", complete=False)
+        self.verify("run", "--host", "claude")
+        self.commit("evidence")
+        code, out = self.verify("gate")
+        self.assertEqual(code, 1)
+        self.assertIn("did not see every change", out)
+
+    def test_records_with_the_same_timestamp_follow_insertion_order(self):
+        reviews = [{"id": "a", "at": "2026-01-01T00:00:01Z", "verdict": "ship"},
+                   {"id": "b", "at": "2026-01-01T00:00:01Z", "verdict": "fix-first"}]
+        self.assertEqual(verify.latest(reviews)["id"], "b")
+        mixed = [{"id": "new", "at": "2026-01-01T00:00:01.500000Z"}, {"id": "old", "at": "2026-01-01T00:00:01Z"}]
+        self.assertEqual(verify.latest(mixed)["id"], "new")
+
+
+class AskPeerContextTest(unittest.TestCase):
+    def test_new_files_are_shown_and_truncation_marks_the_review_incomplete(self):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        repo = Path(tmp.name)
+        git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+        subprocess.run(git + ["init", "-q", "-b", "main"], check=True)
+        (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(git + ["add", "-A"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "i"], check=True)
+        (repo / "new.py").write_text("print('new file body')\n", encoding="utf-8")
+        args = type("Args", (), {"question": None, "base": None, "goal": "g", "max_chars": 60000})()
+        old = os.getcwd()
+        os.chdir(repo)
+        try:
+            context, _, complete = ask_peer.build_context(args)
+            self.assertIn("new file body", context)
+            self.assertTrue(complete)
+            (repo / "big.py").write_text("y = 2\n" * 5000, encoding="utf-8")
+            args.max_chars = 2000
+            _, _, complete = ask_peer.build_context(args)
+            self.assertFalse(complete)
+        finally:
+            os.chdir(old)
 
 
 class ParseVerdictTest(unittest.TestCase):

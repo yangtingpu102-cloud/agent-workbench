@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 for stream in (sys.stdout, sys.stderr):
@@ -46,7 +47,17 @@ class VerifyError(Exception):
 
 
 def now() -> str:
-    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def parse_at(value: str | None) -> dt.datetime:
+    """Accepts timestamps with or without fractional seconds; unknown sorts first."""
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return dt.datetime.strptime(value or "", fmt)
+        except ValueError:
+            continue
+    return dt.datetime.min
 
 
 def git(top: Path, *args: str, env: dict | None = None, check: bool = True) -> str:
@@ -140,11 +151,33 @@ def matching_reviews(top: Path, cid: str) -> list[dict]:
     return found
 
 
+def review_key(review: dict) -> tuple:
+    return (review.get("id"),) if review.get("id") else (review.get("at"), review.get("peer"))
+
+
 def merge_reviews(evidence: dict, reviews: list[dict]) -> int:
-    seen = {(r.get("at"), r.get("peer")) for r in evidence["reviews"]}
-    added = [r for r in reviews if (r.get("at"), r.get("peer")) not in seen]
+    seen = {review_key(r) for r in evidence["reviews"]}
+    added = []
+    for review in reviews:
+        if review_key(review) not in seen:
+            seen.add(review_key(review))
+            added.append(review)
     evidence["reviews"].extend(added)
     return len(added)
+
+
+def committed_reviews(top: Path, rev: str, cid: str) -> list[dict]:
+    """Review records committed under .ai/reviews/ at `rev` (normally none: the folder is gitignored)."""
+    found = []
+    for name in git(top, "ls-tree", "--name-only", f"{rev}:{REVIEWS_DIR}", check=False).splitlines():
+        if name.endswith(".json"):
+            try:
+                review = json.loads(read_file(top, f"{REVIEWS_DIR}/{name}", rev) or "{}")
+            except ValueError:
+                continue
+            if review.get("content") == cid:
+                found.append(review)
+    return found
 
 
 def run_check(top: Path, check: dict) -> dict:
@@ -182,7 +215,8 @@ def cmd_run(args) -> int:
               f"({result['seconds']}s, exit {result['exit']})")
     if content_id(top) != cid:
         raise VerifyError("the content changed while the checks ran (a check wrote files?); fix that and run again")
-    run = {"at": now(), "host": args.host, "head": git(top, "rev-parse", "HEAD", check=False) or None,
+    run = {"id": uuid.uuid4().hex, "at": now(), "host": args.host,
+           "head": git(top, "rev-parse", "HEAD", check=False) or None,
            "branch": git(top, "rev-parse", "--abbrev-ref", "HEAD", check=False) or None,
            "platform": sys.platform, "python": platform.python_version(),
            "checks": results, "passed": all(r["exit"] == 0 for r in results)}
@@ -206,7 +240,10 @@ def cmd_collect(_args) -> int:
 
 
 def latest(items: list[dict]) -> dict | None:
-    return max(items, key=lambda item: item.get("at") or "", default=None)
+    """Newest by timestamp; records with the same timestamp are ordered by their position."""
+    if not items:
+        return None
+    return max(enumerate(items), key=lambda pair: (parse_at(pair[1].get("at")), pair[0]))[1]
 
 
 def is_ancestor(top: Path, older: str, newer: str) -> bool:
@@ -229,18 +266,22 @@ def check_run(evidence: dict, required: list[str]) -> str | None:
     return None
 
 
-def check_review(top: Path, evidence: dict, cid: str, rev: str, base: str | None) -> str | None:
-    """The latest review by an agent other than the author decides, and with --base it must cover the change."""
-    independent = [r for r in evidence.get("reviews", [])
+def check_review(top: Path, reviews: list[dict], cid: str, rev: str, base: str | None) -> str | None:
+    """The latest complete-or-not review by an agent other than the author decides: it must say ship, must have
+    seen every change, and with --base must cover the whole change since the base."""
+    independent = [r for r in reviews
                    if r.get("content") == cid and r.get("peer") and r.get("peer") != r.get("author")]
     review = latest(independent)
     if not review:
-        found = [f"{r.get('verdict')} by {r.get('peer')} for {r.get('author')}" for r in evidence.get("reviews", [])]
+        found = [f"{r.get('verdict')} by {r.get('peer')} for {r.get('author')}" for r in reviews]
         return ("no review of this content by an agent other than its author"
                 + (f" (found: {', '.join(found)})" if found else "") + ". Run cross-review, then `verify.py collect`")
     if review.get("verdict") != "ship":
         return (f"the latest independent review ({review.get('peer')} at {review.get('at')}) says "
                 f"{review.get('verdict')}. Fix the findings, review again until ship, then `verify.py collect`")
+    if review.get("complete") is not True:
+        return (f"the latest independent review ({review.get('peer')} at {review.get('at')}) did not see every "
+                "change (truncated, or new files omitted). Review again with a larger --max-chars")
     if base:
         merge_base = git(top, "merge-base", base, rev, check=False)
         reviewed_from = review.get("base_sha")
@@ -257,9 +298,17 @@ def cmd_gate(args) -> int:
     rev = args.rev or "HEAD"
     cid = content_id(top, rev)
     config = load_config(top, rev)
-    evidence = load_evidence(top, cid, rev)
     required = [c["name"] for c in config["checks"]]
+    require_review = config["require_review"]
     print(f"content {cid[:12]} at {rev}")
+    if args.base:  # the PR may tighten the policy of its base, never loosen it
+        merge_base = git(top, "merge-base", args.base, rev, check=False)
+        base_config = load_config(top, merge_base) if merge_base else {"checks": [], "require_review": False}
+        required += [c["name"] for c in base_config["checks"] if c["name"] not in required]
+        require_review = require_review or base_config["require_review"]
+        print(f"policy checks: {', '.join(required) or '(none)'}; review required: {require_review} "
+              f"(at least the rules of {args.base})")
+    evidence = load_evidence(top, cid, rev)
     problems = []
     if not evidence:
         problems.append(f"no evidence for this content. Commit the change, run `verify.py run --host <you>`, "
@@ -268,8 +317,12 @@ def cmd_gate(args) -> int:
         problems.append(f"{evidence_rel(cid)} records content {evidence.get('content')}, not {cid}")
     else:
         problems.append(check_run(evidence, required))
-        if config["require_review"]:
-            problems.append(check_review(top, evidence, cid, rev, args.base))
+        if require_review:
+            pool = {"reviews": list(evidence.get("reviews", []))}
+            merge_reviews(pool, committed_reviews(top, rev, cid))
+            if git(top, "rev-parse", rev, check=False) == git(top, "rev-parse", "HEAD", check=False):
+                merge_reviews(pool, matching_reviews(top, cid))  # local reviews nobody collected yet
+            problems.append(check_review(top, pool["reviews"], cid, rev, args.base))
     problems = [p for p in problems if p]
     for problem in problems:
         print(f"FAIL  {problem}")
