@@ -134,14 +134,18 @@ def find_binary(host: str) -> str | None:
     return first_file([os.environ.get("WB_CLAUDE_BIN"), shutil.which("claude"), str(Path.home() / ".local" / "bin" / exe)])
 
 
-def build_command(host: str, binary: str, exp: dict, arm: dict, workspace: Path) -> list[str]:
+def build_command(host: str, binary: str, exp: dict, arm: dict, workspace: Path,
+                  budget: float | None = None) -> list[str]:
     common, task = exp.get("common") or {}, exp["task"]
     if host == "claude":
         cmd = [binary, "-p", "--output-format", "json", "--no-session-persistence", "--permission-mode", "acceptEdits",
                "--allowedTools", task.get("claude_allowed_tools", CLAUDE_ALLOWED)]
         if task.get("claude_tools") is not None:
             cmd += ["--tools", task["claude_tools"]]
-        return cmd + list(common.get("claude_args", [])) + list(arm.get("claude_args", []))
+        cmd += list(common.get("claude_args", [])) + list(arm.get("claude_args", []))
+        if budget is not None:  # the CLI enforces this per call, so one run cannot overrun the cap
+            cmd += ["--max-budget-usd", f"{max(budget, 0.0):.4f}"]
+        return cmd
     cmd = [binary, "exec", "--json", "--ephemeral", "--skip-git-repo-check",
            "--sandbox", task.get("codex_sandbox", "workspace-write"), "-C", str(workspace)]
     return cmd + list(common.get("codex_args", [])) + list(arm.get("codex_args", [])) + ["-"]
@@ -244,7 +248,7 @@ def parse_claude(stdout: str) -> dict:
                              "total_input": fresh + write + read, "output": out})
     usage_fields.update({"cost_usd": cost, "cost_source": "reported" if cost is not None else None})
     return {**usage_fields, "turns": data.get("num_turns") if is_count(data.get("num_turns")) else None,
-            "model": ",".join(sorted(per_model)) or None, "answer": str(data.get("result") or "")[-2000:],
+            "model": ",".join(sorted(per_model)) or None, "answer": str(data.get("result") or ""),
             "agent_ok": not data.get("is_error") and data.get("subtype", "success") == "success"}
 
 
@@ -278,7 +282,7 @@ def parse_codex(stdout: str, prices: dict | None) -> dict:
             answer = str(event["item"].get("text") or "")
     ok = turns > 0 and not failed
     if not turns or usage_missing:  # usage or turns the CLI did not report are unknown, not zero
-        return {**UNKNOWN_USAGE, "turns": turns or None, "model": None, "answer": answer[-2000:], "agent_ok": ok}
+        return {**UNKNOWN_USAGE, "turns": turns or None, "model": None, "answer": answer, "agent_ok": ok}
     cost = None
     if prices:  # USD per million tokens
         cost = ((total_in - cached) * prices["input"] + cached * prices["cached_input"] + out * prices["output"]) \
@@ -286,7 +290,7 @@ def parse_codex(stdout: str, prices: dict | None) -> dict:
     return {"cost_usd": cost, "cost_source": "estimated" if cost is not None else None,
             "fresh_input": total_in - cached, "cache_write": written if written_known else None,
             "cache_read": cached, "total_input": total_in, "output": out, "turns": turns, "model": None,
-            "answer": answer[-2000:], "agent_ok": ok}
+            "answer": answer, "agent_ok": ok}
 
 
 # ---------- running ----------
@@ -342,10 +346,11 @@ def codex_model(cmd: list[str]) -> str:
     return model
 
 
-def run_one(exp: dict, host: str, arm: dict, rnd: int, binary: str, keep: bool) -> dict:
+def run_one(exp: dict, host: str, arm: dict, rnd: int, binary: str, keep: bool,
+            budget: float | None = None) -> dict:
     task = exp["task"]
     workspace = prepare_workspace(exp, arm)
-    cmd = build_command(host, binary, exp, arm, workspace)
+    cmd = build_command(host, binary, exp, arm, workspace, budget)
     start = time.monotonic()
     code, stdout, stderr = execute(cmd, workspace, agent_env(exp, arm), task["prompt"], task.get("timeout", 600))
     seconds = round(time.monotonic() - start, 1)
@@ -354,7 +359,8 @@ def run_one(exp: dict, host: str, arm: dict, rnd: int, binary: str, keep: bool) 
         metrics["model"] = codex_model(cmd)
     check_exit = run_check(task.get("check"), workspace, task.get("timeout", 600))
     agent_ok = metrics.pop("agent_ok") and code == 0
-    answer_ok = answer_matches(task.get("expect"), metrics.get("answer"))
+    answer_ok = answer_matches(task.get("expect"), metrics.get("answer"))  # judged on the full answer
+    metrics["answer"] = (metrics.get("answer") or "")[-2000:]
     record = {"id": uuid.uuid4().hex, "at": now(), "experiment": exp["name"], "host": host, "arm": arm["name"],
               "round": rnd, "seconds": seconds, "exit": code, "agent_ok": agent_ok, "check_exit": check_exit,
               "answer_ok": answer_ok, "success": agent_ok and check_exit in (None, 0) and answer_ok is not False,
@@ -398,6 +404,10 @@ def cmd_run(args) -> int:
     missing = [h for h, b in binaries.items() if not b]
     if missing:
         raise BenchError(f"CLI not found for: {', '.join(missing)}")
+    if args.max_cost is not None and "codex" in hosts and not args.allow_overrun:
+        raise BenchError("Codex has no per-call spending limit, so --max-cost can only be checked after each "
+                         "Codex run, and one run may exceed it. Pass --allow-overrun to accept that, or run "
+                         "Claude only (its CLI enforces the remaining budget per call)")
     if args.max_cost is not None and "codex" in hosts and not (exp.get("prices") or {}).get("codex"):
         raise BenchError("--max-cost needs a measurable cost, but Codex reports tokens only. Add "
                          '"prices": {"codex": {"input": .., "cached_input": .., "output": ..}} or drop --max-cost')
@@ -438,7 +448,8 @@ def cmd_run(args) -> int:
                           "exceed the estimate. Run again with a higher cap to resume.")
                     stopped = True
                     break
-            record = run_one(exp, host, arm, rnd, binaries[host], args.keep)
+            budget = args.max_cost - spent if args.max_cost is not None else None
+            record = run_one(exp, host, arm, rnd, binaries[host], args.keep, budget)
             record["fingerprint"] = fp
             history.append(record)
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -622,7 +633,10 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "run":
             p.add_argument("--yes", action="store_true", help="confirm that the runs may spend quota or money")
             p.add_argument("--out", help="results directory (default: .ai/bench/<name>-<time>)")
-            p.add_argument("--max-cost", type=float, help="stop once reported or estimated cost reaches this USD")
+            p.add_argument("--max-cost", type=float, help="total budget in USD; Claude calls get the remainder as "
+                                                           "--max-budget-usd, Codex runs are checked afterwards")
+            p.add_argument("--allow-overrun", action="store_true",
+                           help="accept that a Codex run may exceed --max-cost before it can be checked")
             p.add_argument("--keep", action="store_true", help="keep each run's workspace for inspection")
             p.add_argument("--seed", type=int, default=0, help="seed for the arm order")
     p = sub.add_parser("report")

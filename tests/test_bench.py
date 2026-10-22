@@ -310,9 +310,43 @@ class RunTest(unittest.TestCase):
         self.assertIn("| n/a | 1.0 | m |", bench.build_report(runs, exp))  # turns column, then seconds
         self.assertIn("not comparable", report)
 
-    def test_max_cost_needs_codex_prices(self):
+    def test_claude_calls_get_the_remaining_budget(self):
+        self.run_bench("--runs", "1", "--max-cost", "1")
+        budgets = [c["cmd"][c["cmd"].index("--max-budget-usd") + 1] for c in self.calls]
+        self.assertEqual(budgets[0], "1.0000")
+        self.assertIn(budgets[1], ("0.9800", "0.9500"))  # minus the first run's reported cost
+
+    def test_codex_cap_needs_consent_to_overrun(self):
         code, out = self.run_bench("--hosts", "codex", "--max-cost", "1")
         self.assertEqual(code, 2)
+        self.assertIn("--allow-overrun", out)
+
+    def test_editing_the_tests_fails_the_check(self):
+        def cheat(cmd, cwd, env, stdin, timeout):
+            self.calls.append({"cmd": cmd})
+            (Path(cwd) / "tests" / "test_calc.py").write_text(
+                "import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        pass\n", encoding="utf-8")
+            return 0, CLAUDE_OUTPUT, ""
+        self.fake_execute = cheat
+        self.run_bench("--runs", "1")
+        self.assertFalse(any(r["success"] for r in bench.load_runs(self.out)))
+
+    def test_expect_is_judged_on_the_full_answer(self):
+        data = json.loads(CLAUDE_OUTPUT)
+        data["result"] = "ok" + "x" * 5000
+        self.fake_execute = lambda *a: (0, json.dumps(data), "")
+        argv = ["run", str(EXPERIMENTS / "headless-overhead.json"), "--yes", "--hosts", "claude", "--runs", "1",
+                "--out", str(self.out)]
+        with mock.patch.object(bench, "execute", lambda *a: self.fake_execute(*a)),                 mock.patch.object(bench, "find_binary", lambda host: "claude-bin"),                 contextlib.redirect_stdout(io.StringIO()):
+            bench.main(argv)
+        runs = bench.load_runs(self.out)
+        self.assertTrue(all(r["success"] for r in runs))
+        self.assertTrue(all(len(r["answer"]) == 2000 for r in runs))
+
+    def test_max_cost_needs_codex_prices(self):
+        code, out = self.run_bench("--hosts", "codex", "--max-cost", "1", "--allow-overrun")
+        self.assertEqual(code, 2)
+        self.assertIn("prices", out)
 
     def test_resume_refuses_a_changed_experiment(self):
         import shutil

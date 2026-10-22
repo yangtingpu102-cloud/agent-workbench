@@ -23,4 +23,5 @@ Runs the same task headless in fresh workspaces under two or more configurations
 - Change one variable per arm, and keep the model the same across arms. The report's model column shows it.
 - Never start a run without the user's go-ahead on the run count and the budget.
 - Claude cost comes from the CLI. Codex cost is estimated only when the experiment has `prices` (USD per million tokens). Otherwise compare tokens.
+- `--max-cost` is enforced per call for Claude (each call gets the remaining budget as `--max-budget-usd`). Codex has no per-call limit, so a capped run that includes Codex needs `--allow-overrun`: tell the user that one Codex run can exceed the cap before it is checked.
 - Agents get edit rights inside the temporary workspace: Claude via `acceptEdits` plus an allowed tool list, Codex via the `workspace-write` sandbox. Keep checks and fixtures free of anything you would not run on this machine.
