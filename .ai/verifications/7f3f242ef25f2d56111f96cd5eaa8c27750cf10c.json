@@ -1,0 +1,81 @@
+{
+  "content": "7f3f242ef25f2d56111f96cd5eaa8c27750cf10c",
+  "runs": [
+    {
+      "id": "9e2d75f0994444d191c1b5ed57a84b4c",
+      "at": "2026-10-22T05:14:30.003781Z",
+      "host": "claude",
+      "head": "9caea70a6ea8ba221788924e78a0c5590e89eca3",
+      "branch": "feat/verify-gate",
+      "platform": "win32",
+      "python": "3.13.9",
+      "checks": [
+        {
+          "name": "unit tests",
+          "run": "python -m unittest discover -s tests",
+          "exit": 0,
+          "seconds": 42.7,
+          "output_sha256": "97c3f8730967176d5f042b5e56a03cdf8199dccf8b3784cc9edb8d524af6b55d",
+          "tail": [
+            "..................................................................",
+            "----------------------------------------------------------------------",
+            "Ran 66 tests in 42.316s",
+            "",
+            "OK"
+          ]
+        },
+        {
+          "name": "validate",
+          "run": "python scripts/wb.py validate",
+          "exit": 0,
+          "seconds": 0.3,
+          "output_sha256": "a4b9a5c943a15f19e874b21e9c265d3a7e454974f6616c9381f481173c7e86bf",
+          "tail": [
+            "2 plugins, 4 skills: 0 errors, 0 warnings"
+          ]
+        },
+        {
+          "name": "instruction budget",
+          "run": "python scripts/wb.py lint --no-global --max-tokens 3000",
+          "exit": 0,
+          "seconds": 0.3,
+          "output_sha256": "eb628a16029173ee43c7a8a422d20f3bd39ecdd53496420af9546a4c2c0bac9a",
+          "tail": [
+            "Instruction budget for C:\\Users\\USER\\Documents\\agent-workbench",
+            "(estimated: ASCII/4 + 1 per non-ASCII char; skill metadata is always estimated)",
+            "",
+            "Claude Code: loaded every session",
+            "       91  CLAUDE.md  (project)",
+            "      624  AGENTS.md  (project, @import)",
+            "      715  TOTAL  (project 715, user 0)",
+            "",
+            "Codex: loaded every session at the repo root",
+            "      624  AGENTS.md  (project)",
+            "      624  TOTAL  (project 624, user 0)",
+            "",
+            "info  4 plugin skill(s) under plugins/ are not counted: they load only where the plugin is installed (see `wb.py budget`)"
+          ]
+        }
+      ],
+      "passed": true
+    }
+  ],
+  "reviews": [
+    {
+      "id": "a2710c91e5074ac3a78edbe3ac7511bb",
+      "at": "2026-10-22T05:13:40.122231Z",
+      "peer": "codex",
+      "author": "claude",
+      "content": "7f3f242ef25f2d56111f96cd5eaa8c27750cf10c",
+      "complete": true,
+      "head": "9caea70a6ea8ba221788924e78a0c5590e89eca3",
+      "base_sha": "b28edf21987cdcaa3a685ff403ae80f3e1daa9d7",
+      "scope": "diff vs origin/main",
+      "goal": "Full review of the verify-gate branch against origin/main. Since your last ship, one change: cross-review now excludes .ai/verifications/ (evidence records, the output of reviews) from the reviewed diff, so a review no longer judges stale evidence. Judge the code, tests and docs. Report only real remaining defects; say ship if none are blocking.",
+      "verdict": "ship",
+      "confidence": "high",
+      "findings": 0,
+      "review_file": "20261022-051340-122231-codex.md"
+    }
+  ]
+}
