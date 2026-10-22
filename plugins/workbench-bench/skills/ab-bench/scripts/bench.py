@@ -221,16 +221,15 @@ def parse_claude(stdout: str) -> dict:
         return {**UNKNOWN_USAGE, "turns": None, "model": None, "agent_ok": False}
     per_model = data.get("modelUsage") or {}
     usage = data.get("usage") or {}
-    if per_model and all("inputTokens" in m and "outputTokens" in m for m in per_model.values()):
-        def total(key: str) -> int:  # covers every model the session used, not just the main one
-            return sum(int(m.get(key) or 0) for m in per_model.values())
-        tokens = (total("inputTokens"), total("cacheCreationInputTokens"), total("cacheReadInputTokens"),
-                  total("outputTokens"))
-    elif not per_model and "input_tokens" in usage and "output_tokens" in usage:
-        tokens = tuple(int(usage.get(k) or 0) for k in
-                       ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"))
+    model_keys = ("inputTokens", "cacheCreationInputTokens", "cacheReadInputTokens", "outputTokens")
+    usage_keys = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+    if per_model and all(all(k in m for k in model_keys) for m in per_model.values()):
+        # modelUsage covers every model the session used, not just the main one
+        tokens = tuple(sum(int(m[k] or 0) for m in per_model.values()) for k in model_keys)
+    elif not per_model and all(k in usage for k in usage_keys):
+        tokens = tuple(int(usage[k] or 0) for k in usage_keys)
     else:
-        tokens = None  # a result without usage: unknown, not zero
+        tokens = None  # usage not fully reported: unknown, not zero
     cost = data.get("total_cost_usd")
     usage_fields = UNKNOWN_USAGE.copy()
     if tokens:
@@ -253,17 +252,17 @@ def parse_codex(stdout: str, prices: dict | None) -> dict:
         kind = event.get("type", "")
         if kind == "turn.completed":
             usage = event.get("usage") or {}
-            if "input_tokens" not in usage or "output_tokens" not in usage:
+            if not all(k in usage for k in ("input_tokens", "cached_input_tokens", "output_tokens")):
                 usage_missing = True
             total_in += int(usage.get("input_tokens") or 0)
             cached += int(usage.get("cached_input_tokens") or 0)
-            written += int(usage.get("cache_write_input_tokens") or 0)
+            written += int(usage.get("cache_write_input_tokens") or 0)  # display only; not part of the cost
             out += int(usage.get("output_tokens") or 0)
             turns += 1
         elif kind in ("turn.failed", "error"):
             failed = True
-    if not turns or usage_missing:  # usage the CLI did not report is unknown, not zero
-        return {**UNKNOWN_USAGE, "turns": turns, "model": None, "agent_ok": turns > 0 and not failed}
+    if not turns or usage_missing:  # usage or turns the CLI did not report are unknown, not zero
+        return {**UNKNOWN_USAGE, "turns": turns or None, "model": None, "agent_ok": turns > 0 and not failed}
     cost = None
     if prices and turns:  # USD per million tokens
         cost = ((total_in - cached) * prices.get("input", 0) + cached * prices.get("cached_input", 0)
@@ -511,7 +510,9 @@ def build_report(runs: list[dict], exp: dict, seed: int = 0) -> str:
     rng = random.Random(seed)
     lines = [f"# Benchmark: {exp['name']}", "", exp.get("description", ""), "",
              f"{len(runs)} runs. Cost is reported by Claude Code and estimated for Codex when prices are given. "
-             "Intervals are 95% (Wilson for success, bootstrap for means); fewer than 3 runs per arm shows none.", ""]
+             "Intervals are 95%. Success uses a Wilson interval at any run count (wide when runs are few); means and "
+             "differences use a bootstrap and need at least 3 runs per arm. Unknown values show n/a and are never "
+             "counted as zero.", ""]
     fingerprints = {r.get("fingerprint") for r in runs if r.get("fingerprint")}
     if len(fingerprints) > 1:
         lines += [f"**Warning:** these runs come from {len(fingerprints)} different experiment versions; "

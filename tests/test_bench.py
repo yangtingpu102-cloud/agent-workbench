@@ -67,6 +67,12 @@ class ParseTest(unittest.TestCase):
         self.assertIsNone(c["total_input"])
         self.assertIsNone(c["cost_usd"])
         self.assertTrue(c["agent_ok"])
+        no_cache = json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}})
+        self.assertIsNone(bench.parse_codex(no_cache, {"input": 1.0, "cached_input": 0.1, "output": 2.0})["cost_usd"])
+        self.assertIsNone(bench.parse_codex("", None)["turns"])
+        partial = json.loads(CLAUDE_OUTPUT)
+        del partial["modelUsage"]["claude-sonnet-5"]["cacheReadInputTokens"]
+        self.assertIsNone(bench.parse_claude(json.dumps(partial))["total_input"])
 
     def test_codex_usage_and_estimated_cost(self):
         m = bench.parse_codex(CODEX_OUTPUT, None)
