@@ -1,22 +1,23 @@
-# Handoff — 2026-10-22 03:40 UTC — claude:a1 on main @ b28edf2
+# Handoff — 2026-10-22 05:15 UTC — claude:a1 on feat/verify-gate
 ## Goal
-Grow agent-workbench one opportunity at a time (docs/OPPORTUNITIES.md), each verified on both hosts before merge.
+Ship opportunity #7: evidence records tied to exact content, and a merge gate that needs a passing run plus a full, independent ship review.
 ## State
-done: opportunities #2 (`wb.py lint`, PR #1) and #6 (`workbench-lease`, PR #2) are merged; both plugins are installed at user scope in Claude Code.
+review: Codex said ship on round 6; evidence recorded; PR open against main.
 ## Done
-- workbench-lease live in Claude Code: in a worktree of a temp repo with `src/` leased by main, Edit on README.md succeeded, Edit on src/app.py and Write of src/new_module.py were denied with the lease reason (evidence: files unchanged afterwards)
-- workbench-lease live in Codex 0.162: apply_patch on a leased README.md denied (PR #2 test plan)
-- 39 unit tests pass (`python -m unittest discover -s tests`)
+- verify.py run/collect/gate/show/content; content id = git tree without .ai/ but with .ai/verify.json (evidence: 66 tests OK)
+- Gate: latest run passes the PR's checks and the current base's checks by name and command; latest independent review is ship, complete, and covers the change since the merge base (evidence: one test per Codex finding, 17 findings over 6 rounds)
+- cross-review writes JSON records (id, verdict, complete, base_sha = merge base, content id)
+- CI `gate` job runs `verify.py gate --base <PR base sha>` on pull requests
 ## Next
-1. Opportunity #7: evidence-based cross-verification (JSON review records with commit SHA, command, exit code; a merge gate)
+1. Merge the PR when CI is green; from then on every PR needs committed evidence
 2. Opportunity #1: A/B token benchmark across Claude Code and Codex
-3. Board T2: Codex → Claude cross-review from inside Codex, after `claude` CLI re-login
+3. Board T2: Codex -> Claude cross-review from inside Codex (needs `claude` CLI re-login)
 ## Files
-- docs/OPPORTUNITIES.md: ranked list; #2 and #6 marked implemented
-- plugins/workbench-lease/skills/lease/scripts/lease.py, plugins/workbench-core/skills/cross-review/scripts/ask_peer.py
+- plugins/workbench-core/skills/verify/scripts/verify.py, plugins/workbench-core/skills/cross-review/scripts/ask_peer.py
+- .ai/verify.json: checks and require_review; .ai/verifications/: committed evidence
 ## Verify
-`python -m unittest discover -s tests && python scripts/wb.py validate`
+`python plugins/workbench-core/skills/verify/scripts/verify.py gate --base origin/main`
 ## Gotchas
-- The CLI `claude` reported "OAuth session expired"; hooks of installed plugins can be tested inside a desktop session instead.
-- Codex plugin hooks run only after they are trusted in Codex `/hooks`.
-- The scratchpad path is too long for git on Windows; use `mktemp -d` for throwaway repos.
+- Review against the remote base (`--base origin/main`) when local main has unpushed commits, or CI's coverage check fails.
+- `run` refuses a dirty tree; changes under .ai/ (except verify.json) never invalidate evidence.
+- Heredocs in this shell turn `\n` into real newlines; edit Python string escapes with the Edit tool.
