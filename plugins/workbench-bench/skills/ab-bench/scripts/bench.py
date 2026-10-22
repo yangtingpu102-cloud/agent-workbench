@@ -215,6 +215,10 @@ UNKNOWN_USAGE = {"cost_usd": None, "cost_source": None, "fresh_input": None, "ca
                  "cache_read": None, "total_input": None, "output": None}
 
 
+def is_count(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def parse_claude(stdout: str) -> dict:
     data = last_json_object(stdout)
     if not data:  # no result object (crash or timeout): usage is unknown, not zero
@@ -223,27 +227,32 @@ def parse_claude(stdout: str) -> dict:
     usage = data.get("usage") or {}
     model_keys = ("inputTokens", "cacheCreationInputTokens", "cacheReadInputTokens", "outputTokens")
     usage_keys = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
-    if per_model and all(all(k in m for k in model_keys) for m in per_model.values()):
+    if per_model and all(all(is_count(m.get(k)) for k in model_keys) for m in per_model.values()):
         # modelUsage covers every model the session used, not just the main one
-        tokens = tuple(sum(int(m[k] or 0) for m in per_model.values()) for k in model_keys)
-    elif not per_model and all(k in usage for k in usage_keys):
-        tokens = tuple(int(usage[k] or 0) for k in usage_keys)
+        tokens = tuple(sum(m[k] for m in per_model.values()) for k in model_keys)
+    elif not per_model and all(is_count(usage.get(k)) for k in usage_keys):
+        tokens = tuple(usage[k] for k in usage_keys)
     else:
         tokens = None  # usage not fully reported: unknown, not zero
     cost = data.get("total_cost_usd")
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        cost = None
     usage_fields = UNKNOWN_USAGE.copy()
     if tokens:
         fresh, write, read, out = tokens
         usage_fields.update({"fresh_input": fresh + write, "cache_write": write, "cache_read": read,
                              "total_input": fresh + write + read, "output": out})
     usage_fields.update({"cost_usd": cost, "cost_source": "reported" if cost is not None else None})
-    return {**usage_fields, "turns": data.get("num_turns"), "model": ",".join(sorted(per_model)) or None,
+    return {**usage_fields, "turns": data.get("num_turns") if is_count(data.get("num_turns")) else None,
+            "model": ",".join(sorted(per_model)) or None, "answer": str(data.get("result") or "")[-2000:],
             "agent_ok": not data.get("is_error") and data.get("subtype", "success") == "success"}
 
 
 def parse_codex(stdout: str, prices: dict | None) -> dict:
     total_in = cached = written = out = turns = 0
     failed = usage_missing = False
+    written_known = True
+    answer = ""
     for line in stdout.splitlines():
         try:
             event = json.loads(line)
@@ -252,25 +261,32 @@ def parse_codex(stdout: str, prices: dict | None) -> dict:
         kind = event.get("type", "")
         if kind == "turn.completed":
             usage = event.get("usage") or {}
-            if not all(k in usage for k in ("input_tokens", "cached_input_tokens", "output_tokens")):
+            if not all(is_count(usage.get(k)) for k in ("input_tokens", "cached_input_tokens", "output_tokens")):
                 usage_missing = True
-            total_in += int(usage.get("input_tokens") or 0)
-            cached += int(usage.get("cached_input_tokens") or 0)
-            written += int(usage.get("cache_write_input_tokens") or 0)  # display only; not part of the cost
-            out += int(usage.get("output_tokens") or 0)
+            else:
+                total_in += usage["input_tokens"]
+                cached += usage["cached_input_tokens"]
+                out += usage["output_tokens"]
+            if is_count(usage.get("cache_write_input_tokens")):
+                written += usage["cache_write_input_tokens"]  # display only; not part of the cost estimate
+            else:
+                written_known = False
             turns += 1
         elif kind in ("turn.failed", "error"):
             failed = True
+        elif kind == "item.completed" and (event.get("item") or {}).get("type") == "agent_message":
+            answer = str(event["item"].get("text") or "")
+    ok = turns > 0 and not failed
     if not turns or usage_missing:  # usage or turns the CLI did not report are unknown, not zero
-        return {**UNKNOWN_USAGE, "turns": turns or None, "model": None, "agent_ok": turns > 0 and not failed}
+        return {**UNKNOWN_USAGE, "turns": turns or None, "model": None, "answer": answer[-2000:], "agent_ok": ok}
     cost = None
-    if prices and turns:  # USD per million tokens
-        cost = ((total_in - cached) * prices.get("input", 0) + cached * prices.get("cached_input", 0)
-                + out * prices.get("output", 0)) / 1_000_000
+    if prices:  # USD per million tokens
+        cost = ((total_in - cached) * prices["input"] + cached * prices["cached_input"] + out * prices["output"]) \
+            / 1_000_000
     return {"cost_usd": cost, "cost_source": "estimated" if cost is not None else None,
-            "fresh_input": total_in - cached, "cache_write": written, "cache_read": cached,
-            "total_input": total_in, "output": out, "turns": turns, "model": None,
-            "agent_ok": turns > 0 and not failed}
+            "fresh_input": total_in - cached, "cache_write": written if written_known else None,
+            "cache_read": cached, "total_input": total_in, "output": out, "turns": turns, "model": None,
+            "answer": answer[-2000:], "agent_ok": ok}
 
 
 # ---------- running ----------
@@ -310,6 +326,13 @@ def agent_env(exp: dict, arm: dict) -> dict:
     return env
 
 
+def answer_matches(expect: str | None, answer: str | None) -> bool | None:
+    """With task.expect set, the final answer must contain it (case-insensitive); None means not judged."""
+    if not expect:
+        return None
+    return expect.lower() in (answer or "").lower()
+
+
 def codex_model(cmd: list[str]) -> str:
     """Codex's JSON events do not name the model, so record the one pinned on the command line, if any."""
     model = "unpinned"
@@ -331,9 +354,11 @@ def run_one(exp: dict, host: str, arm: dict, rnd: int, binary: str, keep: bool) 
         metrics["model"] = codex_model(cmd)
     check_exit = run_check(task.get("check"), workspace, task.get("timeout", 600))
     agent_ok = metrics.pop("agent_ok") and code == 0
+    answer_ok = answer_matches(task.get("expect"), metrics.get("answer"))
     record = {"id": uuid.uuid4().hex, "at": now(), "experiment": exp["name"], "host": host, "arm": arm["name"],
               "round": rnd, "seconds": seconds, "exit": code, "agent_ok": agent_ok, "check_exit": check_exit,
-              "success": agent_ok and check_exit in (None, 0), **metrics,
+              "answer_ok": answer_ok, "success": agent_ok and check_exit in (None, 0) and answer_ok is not False,
+              **metrics,
               "error": None if agent_ok else (stderr.strip().splitlines() or ["no output"])[-1][:300]}
     if keep:
         record["workspace"] = str(workspace)
@@ -518,10 +543,16 @@ def build_report(runs: list[dict], exp: dict, seed: int = 0) -> str:
         lines += [f"**Warning:** these runs come from {len(fingerprints)} different experiment versions; "
                   "compare them only with care.", ""]
     arm_order = [a["name"] for a in exp["arms"]]
+    task = exp.get("task") or {}
+    judged = bool(task.get("check") or task.get("expect"))
+    outcome = "success" if judged else "completed"
+    if not judged:
+        lines += ["No `check` or `expect` is defined, so a run only counts as completed (the agent finished "
+                  "without an error); it does not mean the answer was right.", ""]
     for host in [h for h in HOSTS if any(r["host"] == h for r in runs)]:
         lines += [f"## {host}", "",
-                  "| arm | runs | success [95% CI] | cost per run [95% CI] | cost per success | total input [95% CI] "
-                  "| cached | output | turns | seconds | model |",
+                  f"| arm | runs | {outcome} [95% CI] | cost per run [95% CI] | cost per {outcome} | "
+                  "total input [95% CI] | cached | output | turns | seconds | model |",
                   "|---|---|---|---|---|---|---|---|---|---|---|"]
         groups = {name: [r for r in runs if r["host"] == host and r["arm"] == name] for name in arm_order}
         for name, group in groups.items():

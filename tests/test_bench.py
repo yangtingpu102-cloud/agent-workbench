@@ -74,6 +74,33 @@ class ParseTest(unittest.TestCase):
         del partial["modelUsage"]["claude-sonnet-5"]["cacheReadInputTokens"]
         self.assertIsNone(bench.parse_claude(json.dumps(partial))["total_input"])
 
+    def test_null_counts_are_unknown_and_a_missing_cache_write_stays_unknown(self):
+        data = json.loads(CLAUDE_OUTPUT)
+        data["modelUsage"]["claude-sonnet-5"]["inputTokens"] = None
+        self.assertIsNone(bench.parse_claude(json.dumps(data))["total_input"])
+        turn = {"type": "turn.completed", "usage": {"input_tokens": 10, "cached_input_tokens": 4, "output_tokens": 2}}
+        m = bench.parse_codex(json.dumps(turn), {"input": 1.0, "cached_input": 0.1, "output": 2.0})
+        self.assertEqual((m["total_input"], m["cache_read"]), (10, 4))
+        self.assertIsNone(m["cache_write"])
+        self.assertIsNotNone(m["cost_usd"])
+
+    def test_answers_are_captured_and_matched(self):
+        self.assertEqual(bench.parse_codex(CODEX_OUTPUT, None)["answer"], "ok")
+        data = json.loads(CLAUDE_OUTPUT)
+        data["result"] = "OK."
+        self.assertEqual(bench.parse_claude(json.dumps(data))["answer"], "OK.")
+        self.assertTrue(bench.answer_matches("ok", "OK."))
+        self.assertFalse(bench.answer_matches("ok", "no idea"))
+        self.assertIsNone(bench.answer_matches(None, "anything"))
+
+    def test_report_says_completed_when_nothing_judges_the_answer(self):
+        run = {"host": "claude", "arm": "a", "round": 0, "success": True, "cost_usd": 0.1, "total_input": 10,
+               "cache_read": 1, "output": 1, "turns": 1, "seconds": 1.0, "model": "m"}
+        report = bench.build_report([run], {"name": "x", "task": {"prompt": "p"}, "arms": [{"name": "a"}]})
+        self.assertIn("| completed [95% CI] |", report)
+        judged = bench.build_report([run], {"name": "x", "task": {"prompt": "p", "expect": "ok"}, "arms": [{"name": "a"}]})
+        self.assertIn("| success [95% CI] |", judged)
+
     def test_codex_usage_and_estimated_cost(self):
         m = bench.parse_codex(CODEX_OUTPUT, None)
         self.assertEqual((m["total_input"], m["cache_read"], m["fresh_input"], m["output"], m["turns"]),
