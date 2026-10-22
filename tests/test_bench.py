@@ -135,6 +135,14 @@ class ExperimentTest(unittest.TestCase):
             with self.assertRaises(bench.BenchError):
                 bench.load_experiment(self.write_exp(bad))
 
+    def test_price_tables_must_be_complete(self):
+        base = {"name": "x", "task": {"prompt": "p"}, "arms": [{"name": "a"}]}
+        with self.assertRaises(bench.BenchError):
+            bench.load_experiment(self.write_exp({**base, "prices": {"codex": {"input": 1.0, "output": 2.0}}}))
+        ok = bench.load_experiment(self.write_exp(
+            {**base, "prices": {"codex": {"input": 1.0, "cached_input": 0.1, "output": 2.0}}}))
+        self.assertIn("codex", ok["prices"])
+
     def test_arm_files_cannot_leave_the_workspace(self):
         for dest in ("../evil.txt", "/etc/evil", "C:/evil.txt", "a/../../evil.txt"):
             exp = {"name": "x", "task": {"prompt": "p"}, "arms": [{"name": "a", "files": {dest: "x"}}]}
@@ -222,8 +230,18 @@ class RunTest(unittest.TestCase):
         self.run_bench("--runs", "1")
         self.assertEqual(len(bench.load_runs(self.out)), 2)
         code, out = self.run_bench("--runs", "3", "--max-cost", "0.08")  # 0.07 already spent before resuming
+        self.assertEqual(code, bench.EXIT_PARTIAL)
         self.assertIn("stopped", out)
         self.assertEqual(len(bench.load_runs(self.out)), 2)
+
+    def test_runs_of_unknown_cost_block_a_capped_resume(self):
+        real = self.fake_execute
+        self.fake_execute = lambda *a: (None, "", "timed out after 600s")  # no cost recorded
+        self.run_bench("--runs", "1")
+        self.fake_execute = real
+        code, out = self.run_bench("--runs", "2", "--max-cost", "5")
+        self.assertEqual(code, bench.EXIT_PARTIAL)
+        self.assertIn("no known cost", out)
 
     def test_max_cost_needs_codex_prices(self):
         code, out = self.run_bench("--hosts", "codex", "--max-cost", "1")

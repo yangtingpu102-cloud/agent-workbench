@@ -11,6 +11,7 @@ agent headless, runs the task's check, and appends one JSON line to RESULTS_DIR/
 interleaved in a shuffled order every round, and an interrupted run resumes where it stopped.
 Claude cost is the CLI's own total_cost_usd (API list prices, also shown on subscriptions). Codex
 reports tokens only, so its cost is estimated when the experiment gives "prices".
+Exit codes: 0 done, 1 not started (no --yes), 2 error, 3 stopped early at --max-cost (partial report).
 """
 from __future__ import annotations
 
@@ -40,6 +41,8 @@ HOSTS = ("claude", "codex")
 CLAUDE_ALLOWED = "Read,Edit,Write,Glob,Grep"
 BOOTSTRAP_ITERS = 2000
 FIXTURE_IGNORE = ("__pycache__", "*.pyc")
+PRICE_KEYS = ("input", "cached_input", "output")
+EXIT_PARTIAL = 3  # `run` stopped at --max-cost before finishing
 
 
 class BenchError(Exception):
@@ -78,6 +81,10 @@ def load_experiment(path: Path) -> dict:
         for dest in list((arm.get("files_from") or {})) + list((arm.get("files") or {})):
             if not safe_relative(dest):
                 raise BenchError(f"arm {arm['name']}: '{dest}' must be a relative path inside the workspace")
+    for host, table in (exp.get("prices") or {}).items():
+        values = [table.get(k) if isinstance(table, dict) else None for k in PRICE_KEYS]
+        if not all(isinstance(v, (int, float)) and v >= 0 for v in values):
+            raise BenchError(f"prices.{host} needs numbers >= 0 for {', '.join(PRICE_KEYS)} (USD per million tokens)")
     return exp
 
 
@@ -372,10 +379,17 @@ def cmd_run(args) -> int:
     history = load_runs(out_dir)
     done = {(r["host"], r["arm"], r["round"]) for r in history}
     spent = sum(r.get("cost_usd") or 0.0 for r in history)  # a resumed run counts what was already spent
+    stopped = False
     with results_path(out_dir).open("a", encoding="utf-8") as fh:
         for rnd, host, arm in schedule(exp, hosts, runs, args.seed):
             if (host, arm["name"], rnd) in done:
                 continue
+            unknown = [r for r in history if r.get("cost_usd") is None]
+            if args.max_cost is not None and unknown:
+                print(f"stopped: {len(unknown)} recorded run(s) have no known cost (failed or timed out), so "
+                      "--max-cost cannot be enforced. Inspect them, then resume without --max-cost or use a new --out.")
+                stopped = True
+                break
             if args.max_cost is not None:
                 same = [r["cost_usd"] for r in history
                         if r["host"] == host and r["arm"] == arm["name"] and r.get("cost_usd") is not None]
@@ -384,6 +398,7 @@ def cmd_run(args) -> int:
                     print(f"stopped before {host}/{arm['name']} round {rnd}: spent ${spent:.4f}; the next run is "
                           f"estimated at ${estimate:.4f} against --max-cost {args.max_cost}. A single run can still "
                           "exceed the estimate. Run again with a higher cap to resume.")
+                    stopped = True
                     break
             record = run_one(exp, host, arm, rnd, binaries[host], args.keep)
             record["fingerprint"] = fp
@@ -397,8 +412,9 @@ def cmd_run(args) -> int:
                   + (f"  ({record['error']})" if record.get("error") else ""))
     report = build_report(load_runs(out_dir), exp)
     (out_dir / "report.md").write_text(report, encoding="utf-8")
-    print(f"\nresults: {out_dir.as_posix()}/runs.jsonl, report: {out_dir.as_posix()}/report.md")
-    return 0
+    print(f"\nresults: {out_dir.as_posix()}/runs.jsonl, report: {out_dir.as_posix()}/report.md"
+          + (" (partial: stopped before every run finished)" if stopped else ""))
+    return EXIT_PARTIAL if stopped else 0
 
 
 # ---------- statistics and report ----------
