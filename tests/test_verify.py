@@ -18,6 +18,7 @@ import ask_peer  # noqa: E402
 import verify  # noqa: E402
 
 PASS = "python -c \"print('ok')\""
+PASS_B = "python -c \"print('b')\""
 FAIL = "python -c \"import sys; print('boom'); sys.exit(3)\""
 
 
@@ -241,6 +242,33 @@ class VerifyTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("did not pass: check 0", out)
 
+    def test_policy_comes_from_the_current_base_not_the_merge_base(self):
+        self.git("switch", "-q", "-c", "feature")
+        self.write("app.py", "x = 2\n")
+        self.commit("feature work")
+        self.git("switch", "-q", "main")
+        self.config([PASS, PASS_B], commit=True)  # main gains a check after the branch was cut
+        self.git("switch", "-q", "feature")
+        self.verify("run", "--host", "claude")
+        self.commit("evidence without the new check")
+        code, out = self.verify("gate", "--base", "main")
+        self.assertEqual(code, 1)
+        self.assertIn("check 1", out)
+        code, out = self.verify("run", "--host", "claude", "--base", "main")
+        self.assertEqual(code, 0, out)
+        self.assertIn("also running 1 check(s) required by main", out)
+        self.commit("evidence with base checks")
+        self.assertEqual(self.verify("gate", "--base", "main")[0], 0)
+
+    def test_changing_a_check_command_merges_when_old_and_new_both_pass(self):
+        self.git("switch", "-q", "-c", "retool")
+        self.config([PASS_B], commit=True)  # "check 0" gets a new command
+        code, out = self.verify("run", "--host", "claude", "--base", "main")
+        self.assertEqual(code, 0, out)
+        self.commit("evidence")
+        code, out = self.verify("gate", "--base", "main")
+        self.assertEqual(code, 0, out)
+
     def test_an_uncollected_newer_review_still_blocks_locally(self):
         self.config([PASS], require_review=True, commit=True)
         self.add_review("ship", "2026-01-01T00:00:01Z")
@@ -288,6 +316,25 @@ class AskPeerContextTest(unittest.TestCase):
             self.assertTrue(complete)
             (repo / "big.py").write_text("y = 2\n" * 5000, encoding="utf-8")
             args.max_chars = 2000
+            _, _, complete = ask_peer.build_context(args)
+            self.assertFalse(complete)
+        finally:
+            os.chdir(old)
+
+    def test_a_tracked_binary_change_marks_the_review_incomplete(self):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        repo = Path(tmp.name)
+        git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+        subprocess.run(git + ["init", "-q", "-b", "main"], check=True)
+        (repo / "img.bin").write_bytes(b"\x00\x01\x02")
+        subprocess.run(git + ["add", "-A"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "i"], check=True)
+        (repo / "img.bin").write_bytes(b"\x00\x09\x09")
+        args = type("Args", (), {"question": None, "base": None, "goal": "g", "max_chars": 60000})()
+        old = os.getcwd()
+        os.chdir(repo)
+        try:
             _, _, complete = ask_peer.build_context(args)
             self.assertFalse(complete)
         finally:

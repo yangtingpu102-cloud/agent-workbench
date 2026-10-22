@@ -44,9 +44,9 @@ open ──claim──▶ claimed ──完成實作──▶ review ──另�
 4. **看板只有一份**：worktree 裡的 agent 要讀寫**主 checkout** 的 `.ai/board.md`，也就是 `git worktree list` 第一行列出的路徑。不要改自己 worktree 裡那份副本。
 5. **實作者不驗證自己**：狀態改成 `review` 之後，由另一個 agent 用 `cross-review` 審查，直到結論是 `ship`。接著用 `verify` skill 留下證據：
    - 審查要涵蓋整個 PR：用 `cross-review --base main`。結論不是 `ship` 就修正、commit，再整份重審。
-   - commit 之後執行 `verify.py run`：在乾淨的工作目錄跑 `.ai/verify.json` 的檢查，記下指令、結束碼、輸出雜湊，並收進同一份內容的審查紀錄。
+   - commit 之後執行 `verify.py run --base main`（連同 base 要求的檢查一起跑）：在乾淨的工作目錄跑 `.ai/verify.json` 的檢查，記下指令、結束碼、輸出雜湊，並收進同一份內容的審查紀錄。
    - 證據存成 `.ai/verifications/<內容雜湊>.json` 並 commit。內容雜湊不含 `.ai/`（但包含 `.ai/verify.json`），所以更新看板或 HANDOFF 不會讓證據失效；改了程式碼或檢查設定就會失效。
-   - CI 的 `gate` 在 PR 上檢查三件事：最新一次檢查通過；作者以外的 agent 最新一次審查是 `ship`；這份審查涵蓋 PR base 以來的全部改動。缺一項就擋下合併。
+   - CI 的 `gate` 在 PR 上檢查：最新一次檢查通過，而且至少包含**目前 base 分支**要求的檢查（名稱與指令都要相符，PR 只能加嚴、不能放寬）；作者以外的 agent 最新一次審查是 `ship`、看到了全部內容，並且涵蓋 PR base 以來的全部改動。缺一項就擋下合併。
 6. **結束必交接**：暫停或換手前，用 `handoff` skill 覆寫 `.ai/HANDOFF.md`。
 
 ## 三種協作模式

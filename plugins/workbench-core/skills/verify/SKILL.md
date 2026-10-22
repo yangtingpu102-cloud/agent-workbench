@@ -11,7 +11,7 @@ Evidence is tied to a content id: the git tree of the repo without `.ai/`, excep
 ## Steps
 1. Finish and commit the change. The checks are listed in `.ai/verify.json`.
 2. Get an independent review of the whole change with the `cross-review` skill: `--base <PR base>`, e.g. `--base main`. It saves a JSON record. If the verdict is not `ship`, fix the findings, commit, and review the whole change again. The gate only accepts a review that covers everything since the PR base.
-3. Record the evidence on the clean tree: `python <skill-dir>/scripts/verify.py run --host <claude|codex|human>`. It runs the checks and attaches matching reviews. If you reviewed after running, use `verify.py collect` instead.
+3. Record the evidence on the clean tree: `python <skill-dir>/scripts/verify.py run --host <claude|codex|human> --base main`. It runs your checks plus any the base still requires (so changing a check proves both the old and the new command), and attaches matching reviews. If you reviewed after running, use `verify.py collect` instead.
 4. Commit `.ai/verifications/`. Changing only files under `.ai/` keeps the evidence valid.
 5. Confirm: `python <skill-dir>/scripts/verify.py gate --base main`. CI runs the same gate on pull requests.
 

@@ -107,7 +107,8 @@ def build_context(args) -> tuple[str, str, bool | None]:
     untracked = [p for p in git("ls-files", "-z", "--others", "--exclude-standard").split("\0") if p]
     if not diff.strip() and not untracked:
         return "", "", None
-    complete = len(untracked) <= MAX_NEW_FILES
+    binary_change = re.search(r"^(Binary files .+ differ|GIT binary patch)$", diff, re.M)
+    complete = len(untracked) <= MAX_NEW_FILES and not binary_change  # git shows no content for binary changes
     new_files = []
     for rel in untracked[:MAX_NEW_FILES]:
         try:

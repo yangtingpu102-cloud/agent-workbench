@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Evidence that a change was checked, and a merge gate that demands it. Stdlib only.
 
-  python verify.py run --host claude|codex|human   run the checks in .ai/verify.json, then record exit codes,
-                                                   timings and output hashes for the current content
+  python verify.py run --host H [--base REF]       run the checks in .ai/verify.json (plus REF's, with --base),
+                                                   then record exit codes, timings and output hashes
   python verify.py collect                         add matching cross-review records without running checks
   python verify.py gate [--rev REV] [--base REF]   exit 1 unless REV's latest run passed and, when required,
                                                    its latest review by another agent says "ship" (and, with
@@ -205,10 +205,19 @@ def cmd_run(args) -> int:
                           f"Uncommitted: {', '.join(line[3:] for line in dirty[:5])}")
     cid = content_id(top)
     config = load_config(top, None)
-    if not config["checks"]:
+    checks = list(config["checks"])
+    if args.base:  # also run the base's checks, so a changed or removed check is still proven against the old rule
+        if not has_commit(top, args.base):
+            raise VerifyError(f"unknown base {args.base}")
+        own = {(c["name"], c["run"]) for c in checks}
+        extra = [c for c in load_config(top, args.base)["checks"] if (c["name"], c["run"]) not in own]
+        if extra:
+            print(f"also running {len(extra)} check(s) required by {args.base}")
+        checks += extra
+    if not checks:
         print(f"no checks in {CONFIG}; recording reviews only")
     results = []
-    for check in config["checks"]:
+    for check in checks:
         result = run_check(top, check)
         results.append(result)
         print(f"{'pass' if result['exit'] == 0 else 'FAIL'}  {result['name']}  "
@@ -302,9 +311,10 @@ def cmd_gate(args) -> int:
     required = [(c["name"], c["run"]) for c in config["checks"]]
     require_review = config["require_review"]
     print(f"content {cid[:12]} at {rev}")
-    if args.base:  # the PR may tighten the policy of its base, never loosen it
-        merge_base = git(top, "merge-base", args.base, rev, check=False)
-        base_config = load_config(top, merge_base) if merge_base else {"checks": [], "require_review": False}
+    if args.base:  # the PR may tighten the current base's policy, never loosen it
+        if not has_commit(top, args.base):
+            raise VerifyError(f"unknown base {args.base}")
+        base_config = load_config(top, args.base)
         required += [(c["name"], c["run"]) for c in base_config["checks"] if (c["name"], c["run"]) not in required]
         require_review = require_review or base_config["require_review"]
         print(f"policy checks: {', '.join(name for name, _ in required) or '(none)'}; review required: "
@@ -358,6 +368,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("run")
     p.add_argument("--host", required=True, help="who runs the checks: claude, codex or human")
+    p.add_argument("--base", help="also run the checks this branch must still satisfy, e.g. main")
     sub.add_parser("collect")
     for name in ("gate", "show", "content"):
         p = sub.add_parser(name)
