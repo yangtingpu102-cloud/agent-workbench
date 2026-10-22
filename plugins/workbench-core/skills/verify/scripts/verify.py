@@ -251,18 +251,19 @@ def is_ancestor(top: Path, older: str, newer: str) -> bool:
                           capture_output=True).returncode == 0
 
 
-def check_run(evidence: dict, required: list[str]) -> str | None:
-    """The latest run decides: an older pass does not outweigh a newer failure."""
+def check_run(evidence: dict, required: list[tuple[str, str]]) -> str | None:
+    """The latest run decides: an older pass does not outweigh a newer failure. A required check matches by
+    name and command, so a same-named no-op does not count."""
+    names = ", ".join(name for name, _ in required) or "none configured"
     run = latest(evidence.get("runs", []))
     if not run:
-        return f"no recorded run of the required checks ({', '.join(required) or 'none configured'})"
-    passed = {c["name"] for c in run.get("checks", []) if c.get("exit") == 0}
-    missing = [name for name in required if name not in passed]
+        return f"no recorded run of the required checks ({names})"
+    passed = {(c.get("name"), c.get("run")) for c in run.get("checks", []) if c.get("exit") == 0}
+    missing = [f"{name} (`{cmd}`)" for name, cmd in required if (name, cmd) not in passed]
     if not run.get("passed") or missing:
         return (f"the latest run ({run.get('host')} on {run.get('platform')} at {run.get('at')}) did not pass"
                 + (f": {', '.join(missing)}" if missing else ""))
-    print(f"ok    latest run passed {', '.join(required) or '(no checks required)'} "
-          f"({run.get('host')} on {run.get('platform')} at {run.get('at')})")
+    print(f"ok    latest run passed {names} ({run.get('host')} on {run.get('platform')} at {run.get('at')})")
     return None
 
 
@@ -298,16 +299,16 @@ def cmd_gate(args) -> int:
     rev = args.rev or "HEAD"
     cid = content_id(top, rev)
     config = load_config(top, rev)
-    required = [c["name"] for c in config["checks"]]
+    required = [(c["name"], c["run"]) for c in config["checks"]]
     require_review = config["require_review"]
     print(f"content {cid[:12]} at {rev}")
     if args.base:  # the PR may tighten the policy of its base, never loosen it
         merge_base = git(top, "merge-base", args.base, rev, check=False)
         base_config = load_config(top, merge_base) if merge_base else {"checks": [], "require_review": False}
-        required += [c["name"] for c in base_config["checks"] if c["name"] not in required]
+        required += [(c["name"], c["run"]) for c in base_config["checks"] if (c["name"], c["run"]) not in required]
         require_review = require_review or base_config["require_review"]
-        print(f"policy checks: {', '.join(required) or '(none)'}; review required: {require_review} "
-              f"(at least the rules of {args.base})")
+        print(f"policy checks: {', '.join(name for name, _ in required) or '(none)'}; review required: "
+              f"{require_review} (at least the rules of {args.base})")
     evidence = load_evidence(top, cid, rev)
     problems = []
     if not evidence:

@@ -231,6 +231,16 @@ class VerifyTest(unittest.TestCase):
         self.assertIn("did not pass: check 0", out)
         self.assertIn("no review of this content", out)
 
+    def test_a_same_named_noop_does_not_satisfy_the_base_check(self):
+        self.config([PASS], commit=True)
+        self.git("switch", "-q", "-c", "noop")
+        self.config(["python -c \"pass\""], commit=True)  # same name "check 0", different command
+        self.verify("run", "--host", "claude")
+        self.commit("evidence")
+        code, out = self.verify("gate", "--base", "main")
+        self.assertEqual(code, 1)
+        self.assertIn("did not pass: check 0", out)
+
     def test_an_uncollected_newer_review_still_blocks_locally(self):
         self.config([PASS], require_review=True, commit=True)
         self.add_review("ship", "2026-01-01T00:00:01Z")
@@ -282,6 +292,15 @@ class AskPeerContextTest(unittest.TestCase):
             self.assertFalse(complete)
         finally:
             os.chdir(old)
+
+
+class EvidenceCompleteTest(unittest.TestCase):
+    def test_review_counts_only_when_whole_and_unchanged(self):
+        self.assertTrue(ask_peer.evidence_complete(True, "x" * 10, 100, "abc", "abc"))
+        self.assertFalse(ask_peer.evidence_complete(True, "x" * 200, 100, "abc", "abc"))  # cut by build_prompt
+        self.assertFalse(ask_peer.evidence_complete(True, "x", 100, "abc", "def"))  # edited during review
+        self.assertFalse(ask_peer.evidence_complete(False, "x", 100, "abc", "abc"))
+        self.assertIsNone(ask_peer.evidence_complete(None, "x", 100, "abc", "abc"))  # questions are not reviews
 
 
 class ParseVerdictTest(unittest.TestCase):

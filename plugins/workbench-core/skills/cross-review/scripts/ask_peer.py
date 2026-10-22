@@ -130,6 +130,15 @@ def build_context(args) -> tuple[str, str, bool | None]:
     return "\n".join(p for p in (head, "--- CHANGES ---", body, tail) if p), REVIEW_FORMAT, complete
 
 
+def evidence_complete(complete: bool | None, context: str, max_chars: int, cid_before: str | None,
+                      cid_after: str | None) -> bool | None:
+    """A review counts as evidence only if the peer got every change in the prompt actually sent and the
+    content did not change while it was reviewing."""
+    if complete is None:
+        return None
+    return bool(complete and len(context) <= max_chars and cid_before and cid_before == cid_after)
+
+
 def build_prompt(context: str, fmt: str, max_chars: int) -> str:
     context = truncate(context, max_chars)
     return (
@@ -262,6 +271,7 @@ def main() -> int:
             print("\n".join(r.stderr.strip().splitlines()[-15:]))
             return 1
 
+    complete = evidence_complete(complete, context, args.max_chars, cid, content_id(root))
     path, json_path = save_review(root, peer, author, cid, complete, args, verdict)
     lines = verdict.strip().splitlines()
     print("\n".join(lines[:PRINT_LINES]))
@@ -269,8 +279,8 @@ def main() -> int:
         print(f"[{len(lines) - PRINT_LINES} more lines in the saved review]")
     print(f"\nsaved: {path.relative_to(root).as_posix()} and {json_path.name} (content {(cid or 'unknown')[:12]})")
     if complete is False:
-        print("note: the peer did not see every change (truncated, or new files omitted), so this review does not "
-              "count as evidence. Raise --max-chars or review a smaller change.")
+        print("note: the peer did not see every change (truncated, new files omitted, or files changed during the "
+              "review), so this review does not count as evidence. Raise --max-chars or review again.")
     return 0
 
 
