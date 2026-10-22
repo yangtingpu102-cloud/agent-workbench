@@ -51,7 +51,10 @@ class ParseTest(unittest.TestCase):
         m = bench.parse_claude(json.dumps(data))
         self.assertEqual(m["total_input"], 9342)
         self.assertFalse(m["agent_ok"])
-        self.assertFalse(bench.parse_claude("")["agent_ok"])
+        empty = bench.parse_claude("")
+        self.assertFalse(empty["agent_ok"])
+        self.assertIsNone(empty["total_input"])  # unknown, not zero
+        self.assertIsNone(bench.parse_codex("", None)["total_input"])
 
     def test_codex_usage_and_estimated_cost(self):
         m = bench.parse_codex(CODEX_OUTPUT, None)
@@ -242,6 +245,23 @@ class RunTest(unittest.TestCase):
         code, out = self.run_bench("--runs", "2", "--max-cost", "5")
         self.assertEqual(code, bench.EXIT_PARTIAL)
         self.assertIn("no known cost", out)
+
+    def test_a_capped_run_stops_when_a_cost_is_unknown(self):
+        self.fake_execute = lambda *a: (None, "", "timed out after 600s")
+        code, out = self.run_bench("--runs", "1", "--max-cost", "5")
+        self.assertEqual(code, bench.EXIT_PARTIAL)
+        self.assertIn("can no longer be enforced", out)
+        self.assertEqual(len(bench.load_runs(self.out)), 1)
+
+    def test_report_does_not_average_over_unknown_costs(self):
+        exp = {"name": "x", "arms": [{"name": "a"}, {"name": "b"}]}
+        def run(arm, rnd, cost):
+            return {"host": "claude", "arm": arm, "round": rnd, "success": True, "cost_usd": cost,
+                    "total_input": 100, "cache_read": 10, "output": 5, "turns": 1, "seconds": 1.0, "model": "m"}
+        runs = [run("a", r, 1.0) for r in range(3)] + [run("b", 0, 0.1), run("b", 1, None), run("b", 2, 0.1)]
+        report = bench.build_report(runs, exp)
+        self.assertIn("n/a (1 of 3 unknown)", report)
+        self.assertIn("not comparable", report)
 
     def test_max_cost_needs_codex_prices(self):
         code, out = self.run_bench("--hosts", "codex", "--max-cost", "1")

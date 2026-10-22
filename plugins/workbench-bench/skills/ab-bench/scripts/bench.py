@@ -211,8 +211,14 @@ def last_json_object(text: str) -> dict:
         return {}
 
 
+UNKNOWN_USAGE = {"cost_usd": None, "cost_source": None, "fresh_input": None, "cache_write": None,
+                 "cache_read": None, "total_input": None, "output": None}
+
+
 def parse_claude(stdout: str) -> dict:
     data = last_json_object(stdout)
+    if not data:  # no result object (crash or timeout): usage is unknown, not zero
+        return {**UNKNOWN_USAGE, "turns": None, "model": None, "agent_ok": False}
     per_model = data.get("modelUsage") or {}
     if per_model:  # covers every model the session used, not just the main one
         def total(key: str) -> int:
@@ -250,6 +256,8 @@ def parse_codex(stdout: str, prices: dict | None) -> dict:
             turns += 1
         elif kind in ("turn.failed", "error"):
             failed = True
+    if not turns:  # no completed turn: usage is unknown, not zero
+        return {**UNKNOWN_USAGE, "turns": 0, "model": None, "agent_ok": False}
     cost = None
     if prices and turns:  # USD per million tokens
         cost = ((total_in - cached) * prices.get("input", 0) + cached * prices.get("cached_input", 0)
@@ -407,9 +415,14 @@ def cmd_run(args) -> int:
             fh.flush()
             spent += record.get("cost_usd") or 0.0
             cost = f"${record['cost_usd']:.4f}" if record.get("cost_usd") is not None else "cost n/a"
+            tokens = (f"{record['total_input']:>8} in {record['output']:>6} out" if record.get("total_input") is not None
+                      else "   usage unknown")
             print(f"round {rnd} {host:<6} {arm['name']:<12} {'ok  ' if record['success'] else 'FAIL'} "
-                  f"{record['total_input']:>8} in {record['output']:>6} out {cost} {record['seconds']}s"
-                  + (f"  ({record['error']})" if record.get("error") else ""))
+                  f"{tokens} {cost} {record['seconds']}s" + (f"  ({record['error']})" if record.get("error") else ""))
+            if args.max_cost is not None and record.get("cost_usd") is None:
+                print("stopped: that run's cost is unknown, so --max-cost can no longer be enforced.")
+                stopped = True
+                break
     report = build_report(load_runs(out_dir), exp)
     (out_dir / "report.md").write_text(report, encoding="utf-8")
     print(f"\nresults: {out_dir.as_posix()}/runs.jsonl, report: {out_dir.as_posix()}/report.md"
@@ -448,6 +461,24 @@ def bootstrap_paired(base: dict[int, float], other: dict[int, float], rng: rando
 
 def by_round(group: list[dict], key: str) -> dict[int, float]:
     return {r["round"]: float(r[key]) for r in group if r.get(key) is not None}
+
+
+def complete(group: list[dict], key: str) -> bool:
+    return all(r.get(key) is not None for r in group)
+
+
+def summarize(group: list[dict], key: str, rng: random.Random, money: bool = False,
+              interval: bool = True) -> tuple[str, list[float] | None]:
+    """Mean (and 95% interval) of a column, or "n/a" when any run lacks the value: averaging only the known
+    runs would quietly favor the arm whose expensive runs failed to report."""
+    missing = sum(1 for r in group if r.get(key) is None)
+    if missing:
+        return f"n/a ({missing} of {len(group)} unknown)", None
+    values = [float(r[key]) for r in group]
+    text = fmt_num(statistics.fmean(values), money)
+    if interval and (ci := bootstrap_ci(values, rng)):
+        text += f" {fmt_ci(ci, money)}"
+    return text, values
 
 
 def fmt_num(value: float | None, money: bool = False) -> str:
@@ -491,17 +522,16 @@ def build_report(runs: list[dict], exp: dict, seed: int = 0) -> str:
                 continue
             n, ok = len(group), sum(1 for r in group if r.get("success"))
             low, high = wilson(ok, n)
-            costs = [r["cost_usd"] for r in group if r.get("cost_usd") is not None]
-            inputs = [float(r.get("total_input") or 0) for r in group]
-            cached = sum(r.get("cache_read") or 0 for r in group) / max(1, sum(inputs))
-            per_success = sum(costs) / ok if costs and ok else None
+            cost_text, costs = summarize(group, "cost_usd", rng, money=True)
+            input_text, inputs = summarize(group, "total_input", rng)
+            output_text, _ = summarize(group, "output", rng, interval=False)
+            per_success = fmt_num(sum(costs) / ok, True) if costs is not None and ok else "n/a"
+            reads = [r.get("cache_read") for r in group]
+            cached = (f"{sum(reads) / sum(inputs):.0%}" if inputs and sum(inputs) and None not in reads else "n/a")
             models = ",".join(sorted({r.get("model") for r in group if r.get("model")})) or "-"
             lines.append(
-                f"| {name} | {n} | {ok}/{n} [{low:.0%}, {high:.0%}] | "
-                f"{fmt_num(statistics.fmean(costs) if costs else None, True)} {fmt_ci(bootstrap_ci(costs, rng), True)} | "
-                f"{fmt_num(per_success, True)} | {fmt_num(statistics.fmean(inputs))} {fmt_ci(bootstrap_ci(inputs, rng))} | "
-                f"{cached:.0%} | {fmt_num(statistics.fmean([float(r.get('output') or 0) for r in group]))} | "
-                f"{statistics.fmean([float(r.get('turns') or 0) for r in group]):.1f} | "
+                f"| {name} | {n} | {ok}/{n} [{low:.0%}, {high:.0%}] | {cost_text} | {per_success} | {input_text} | "
+                f"{cached} | {output_text} | {statistics.fmean([float(r.get('turns') or 0) for r in group]):.1f} | "
                 f"{statistics.fmean([float(r.get('seconds') or 0) for r in group]):.1f} | {models} |")
         base_name = next((name for name in arm_order if groups.get(name)), None)
         others = [name for name in arm_order if name != base_name and groups.get(name)]
@@ -511,10 +541,14 @@ def build_report(runs: list[dict], exp: dict, seed: int = 0) -> str:
             base = groups[base_name]
             for name in others:
                 group = groups[name]
-                cost_ci = bootstrap_paired(by_round(base, "cost_usd"), by_round(group, "cost_usd"), rng)
-                input_ci = bootstrap_paired(by_round(base, "total_input"), by_round(group, "total_input"), rng)
-                lines.append(f"| {name} | {fmt_ci(cost_ci, True) or 'n/a'} | {verdict(cost_ci)} | "
-                             f"{fmt_ci(input_ci) or 'n/a'} | {verdict(input_ci)} |")
+                cells = []
+                for key, money in (("cost_usd", True), ("total_input", False)):
+                    if not (complete(base, key) and complete(group, key)):
+                        cells += ["n/a (some values unknown)", "not comparable"]
+                        continue
+                    ci = bootstrap_paired(by_round(base, key), by_round(group, key), rng)
+                    cells += [fmt_ci(ci, money) or "n/a", verdict(ci)]
+                lines.append(f"| {name} | " + " | ".join(cells) + " |")
         if host == "codex" and any(r.get("model") == "unpinned" for r in runs if r["host"] == host):
             lines += ["", "Codex does not report its model. Pin it with `-m <model>` in `common.codex_args` so every "
                           "arm uses the same one; otherwise an arm such as `--ignore-user-config` may change it."]
