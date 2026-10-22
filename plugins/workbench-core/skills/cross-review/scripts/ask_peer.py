@@ -40,6 +40,8 @@ CONFIDENCE: high | med | low"""
 PRINT_LINES = 60
 MAX_NEW_FILES = 50
 MAX_NEW_FILE_BYTES = 100_000
+# Evidence records are the output of reviews, not part of what a review judges.
+NOT_REVIEWED = (".", ":(exclude).ai/verifications")
 
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -103,12 +105,14 @@ def build_context(args) -> tuple[str, str, bool | None]:
         if not ok or not merge_base.strip():
             raise UsageError(f"no merge base with '{args.base}': is it a valid ref?")
         args.review_base = merge_base.strip()
-        ok, diff = git_ok("diff", args.review_base)
+        ok, diff = git_ok("diff", args.review_base, "--", *NOT_REVIEWED)
         if not ok:
             raise UsageError(f"git diff {args.review_base} failed")
-    else:
-        diff = git("diff", "HEAD") or (git("diff", "--cached") + git("diff"))  # no HEAD yet in a new repo
-    untracked = [p for p in git("ls-files", "-z", "--others", "--exclude-standard").split("\0") if p]
+    else:  # no HEAD yet in a new repo: fall back to staged plus unstaged changes
+        diff = git("diff", "HEAD", "--", *NOT_REVIEWED) or (
+            git("diff", "--cached", "--", *NOT_REVIEWED) + git("diff", "--", *NOT_REVIEWED))
+    untracked = [p for p in git("ls-files", "-z", "--others", "--exclude-standard", "--", *NOT_REVIEWED).split("\0")
+                 if p]
     if not diff.strip() and not untracked:
         return "", "", None
     binary_change = re.search(r"^(Binary files .+ differ|GIT binary patch)$", diff, re.M)

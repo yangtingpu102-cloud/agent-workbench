@@ -334,6 +334,8 @@ class AskPeerContextTest(unittest.TestCase):
         fork = run("rev-parse", "HEAD")
         run("switch", "-q", "-c", "feature")
         (repo / "feature.py").write_text("print('feature change')\n", encoding="utf-8")
+        (repo / ".ai" / "verifications").mkdir(parents=True)
+        (repo / ".ai" / "verifications" / "abc.json").write_text("{}\n", encoding="utf-8")
         run("add", "-A")
         run("commit", "-q", "-m", "B")
         run("switch", "-q", "main")
@@ -350,6 +352,7 @@ class AskPeerContextTest(unittest.TestCase):
             os.chdir(old)
         self.assertIn("feature change", context)
         self.assertNotIn("main moved on", context)
+        self.assertNotIn("verifications", context)
         self.assertEqual(args.review_base, fork)
         self.assertTrue(complete)
 
