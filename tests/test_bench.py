@@ -56,6 +56,18 @@ class ParseTest(unittest.TestCase):
         self.assertIsNone(empty["total_input"])  # unknown, not zero
         self.assertIsNone(bench.parse_codex("", None)["total_input"])
 
+    def test_results_without_usage_are_unknown_not_zero(self):
+        data = json.loads(CLAUDE_OUTPUT)
+        del data["modelUsage"], data["usage"]
+        m = bench.parse_claude(json.dumps(data))
+        self.assertIsNone(m["total_input"])
+        self.assertEqual(m["cost_usd"], 0.0248906)  # the CLI still reported its cost
+        bare_turn = json.dumps({"type": "turn.completed"})
+        c = bench.parse_codex(bare_turn, {"input": 1.0, "cached_input": 0.1, "output": 2.0})
+        self.assertIsNone(c["total_input"])
+        self.assertIsNone(c["cost_usd"])
+        self.assertTrue(c["agent_ok"])
+
     def test_codex_usage_and_estimated_cost(self):
         m = bench.parse_codex(CODEX_OUTPUT, None)
         self.assertEqual((m["total_input"], m["cache_read"], m["fresh_input"], m["output"], m["turns"]),
@@ -261,6 +273,8 @@ class RunTest(unittest.TestCase):
         runs = [run("a", r, 1.0) for r in range(3)] + [run("b", 0, 0.1), run("b", 1, None), run("b", 2, 0.1)]
         report = bench.build_report(runs, exp)
         self.assertIn("n/a (1 of 3 unknown)", report)
+        runs[4]["turns"] = None
+        self.assertIn("| n/a | 1.0 | m |", bench.build_report(runs, exp))  # turns column, then seconds
         self.assertIn("not comparable", report)
 
     def test_max_cost_needs_codex_prices(self):

@@ -220,27 +220,31 @@ def parse_claude(stdout: str) -> dict:
     if not data:  # no result object (crash or timeout): usage is unknown, not zero
         return {**UNKNOWN_USAGE, "turns": None, "model": None, "agent_ok": False}
     per_model = data.get("modelUsage") or {}
-    if per_model:  # covers every model the session used, not just the main one
-        def total(key: str) -> int:
+    usage = data.get("usage") or {}
+    if per_model and all("inputTokens" in m and "outputTokens" in m for m in per_model.values()):
+        def total(key: str) -> int:  # covers every model the session used, not just the main one
             return sum(int(m.get(key) or 0) for m in per_model.values())
-        fresh, write, read, out = (total("inputTokens"), total("cacheCreationInputTokens"),
-                                   total("cacheReadInputTokens"), total("outputTokens"))
+        tokens = (total("inputTokens"), total("cacheCreationInputTokens"), total("cacheReadInputTokens"),
+                  total("outputTokens"))
+    elif not per_model and "input_tokens" in usage and "output_tokens" in usage:
+        tokens = tuple(int(usage.get(k) or 0) for k in
+                       ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"))
     else:
-        usage = data.get("usage") or {}
-        fresh, write, read, out = (int(usage.get(k) or 0) for k in
-                                   ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
-                                    "output_tokens"))
+        tokens = None  # a result without usage: unknown, not zero
     cost = data.get("total_cost_usd")
-    return {"cost_usd": cost, "cost_source": "reported" if cost is not None else None,
-            "fresh_input": fresh + write, "cache_write": write, "cache_read": read,
-            "total_input": fresh + write + read, "output": out, "turns": data.get("num_turns"),
-            "model": ",".join(sorted(per_model)) or None,
-            "agent_ok": bool(data) and not data.get("is_error") and data.get("subtype", "success") == "success"}
+    usage_fields = UNKNOWN_USAGE.copy()
+    if tokens:
+        fresh, write, read, out = tokens
+        usage_fields.update({"fresh_input": fresh + write, "cache_write": write, "cache_read": read,
+                             "total_input": fresh + write + read, "output": out})
+    usage_fields.update({"cost_usd": cost, "cost_source": "reported" if cost is not None else None})
+    return {**usage_fields, "turns": data.get("num_turns"), "model": ",".join(sorted(per_model)) or None,
+            "agent_ok": not data.get("is_error") and data.get("subtype", "success") == "success"}
 
 
 def parse_codex(stdout: str, prices: dict | None) -> dict:
     total_in = cached = written = out = turns = 0
-    failed = False
+    failed = usage_missing = False
     for line in stdout.splitlines():
         try:
             event = json.loads(line)
@@ -249,6 +253,8 @@ def parse_codex(stdout: str, prices: dict | None) -> dict:
         kind = event.get("type", "")
         if kind == "turn.completed":
             usage = event.get("usage") or {}
+            if "input_tokens" not in usage or "output_tokens" not in usage:
+                usage_missing = True
             total_in += int(usage.get("input_tokens") or 0)
             cached += int(usage.get("cached_input_tokens") or 0)
             written += int(usage.get("cache_write_input_tokens") or 0)
@@ -256,8 +262,8 @@ def parse_codex(stdout: str, prices: dict | None) -> dict:
             turns += 1
         elif kind in ("turn.failed", "error"):
             failed = True
-    if not turns:  # no completed turn: usage is unknown, not zero
-        return {**UNKNOWN_USAGE, "turns": 0, "model": None, "agent_ok": False}
+    if not turns or usage_missing:  # usage the CLI did not report is unknown, not zero
+        return {**UNKNOWN_USAGE, "turns": turns, "model": None, "agent_ok": turns > 0 and not failed}
     cost = None
     if prices and turns:  # USD per million tokens
         cost = ((total_in - cached) * prices.get("input", 0) + cached * prices.get("cached_input", 0)
@@ -529,9 +535,11 @@ def build_report(runs: list[dict], exp: dict, seed: int = 0) -> str:
             reads = [r.get("cache_read") for r in group]
             cached = (f"{sum(reads) / sum(inputs):.0%}" if inputs and sum(inputs) and None not in reads else "n/a")
             models = ",".join(sorted({r.get("model") for r in group if r.get("model")})) or "-"
+            turns = ("n/a" if not complete(group, "turns")
+                     else f"{statistics.fmean([float(r['turns']) for r in group]):.1f}")
             lines.append(
                 f"| {name} | {n} | {ok}/{n} [{low:.0%}, {high:.0%}] | {cost_text} | {per_success} | {input_text} | "
-                f"{cached} | {output_text} | {statistics.fmean([float(r.get('turns') or 0) for r in group]):.1f} | "
+                f"{cached} | {output_text} | {turns} | "
                 f"{statistics.fmean([float(r.get('seconds') or 0) for r in group]):.1f} | {models} |")
         base_name = next((name for name in arm_order if groups.get(name)), None)
         others = [name for name in arm_order if name != base_name and groups.get(name)]
