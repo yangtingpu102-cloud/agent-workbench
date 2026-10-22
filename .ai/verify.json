@@ -1,0 +1,8 @@
+{
+  "checks": [
+    {"name": "unit tests", "run": "python -m unittest discover -s tests"},
+    {"name": "validate", "run": "python scripts/wb.py validate"},
+    {"name": "instruction budget", "run": "python scripts/wb.py lint --no-global --max-tokens 3000"}
+  ],
+  "require_review": true
+}

@@ -41,7 +41,7 @@
    - `python scripts/wb.py budget`：估算常駐成本。
    - `claude plugin details <plugin>`：官方的 projected token cost。
    - `claude plugin eval plugins/<plugin> --max-cost-usd 5`：有／無 plugin 的對照組，會花錢。
-7. **交叉審查**：請另一個 AI 用 `cross-review` 看 diff。
+7. **交叉審查與證據**：請另一個 AI 用 `cross-review` 看 diff，修到結論是 `ship`；再執行 `python plugins/workbench-core/skills/verify/scripts/verify.py run --host <你>`，把 `.ai/verifications/` 一起 commit。PR 上的 CI `gate` 會檢查這份證據。
 8. **發佈**：開 PR，等 CI 綠燈後合併。接著把兩份 manifest 的 `version` 一起升版，執行 `claude plugin tag plugins/<plugin>`，再推送 tag。
 9. **使用者安裝**：
 

@@ -8,7 +8,7 @@
     {
       "name": "workbench-core",
       "source": "./plugins/workbench-core",
-      "description": "Cross-agent handoff and read-only cross-review between Claude Code and Codex."
+      "description": "Cross-agent handoff, read-only cross-review, and evidence-based verification between Claude Code and Codex."
     },
     {
       "name": "workbench-lease",

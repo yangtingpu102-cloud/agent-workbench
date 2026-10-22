@@ -26,6 +26,19 @@ jobs:
       - name: Cross-review helper dry run
         run: python plugins/workbench-core/skills/cross-review/scripts/ask_peer.py --peer codex --question "smoke test" --dry-run
 
+  gate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Evidence gate (checks passed and a ship review by the other agent)
+        run: python plugins/workbench-core/skills/verify/scripts/verify.py gate
+
   claude-validate:
     runs-on: ubuntu-latest
     steps:

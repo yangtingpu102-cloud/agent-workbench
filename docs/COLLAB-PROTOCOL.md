@@ -42,7 +42,11 @@ open ──claim──▶ claimed ──完成實作──▶ review ──另�
 2. **先 claim 再改**：不要編輯別人租約中的 scope。裝了 `workbench-lease` 之後，這條由 hook 強制執行。
 3. **一個 scope 只有一個寫入者**：兩個 agent 同時寫程式時，各自開 git worktree 和分支：`git worktree add ../wb-codex -b codex/T4`。
 4. **看板只有一份**：worktree 裡的 agent 要讀寫**主 checkout** 的 `.ai/board.md`，也就是 `git worktree list` 第一行列出的路徑。不要改自己 worktree 裡那份副本。
-5. **實作者不驗證自己**：狀態改成 `review` 之後，由另一個 agent 用 `cross-review` 或自己的驗證流程確認，並附上證據（指令與結果）。
+5. **實作者不驗證自己**：狀態改成 `review` 之後，由另一個 agent 用 `cross-review` 審查，直到結論是 `ship`。接著用 `verify` skill 留下證據：
+   - `verify.py run` 執行 `.ai/verify.json` 的檢查，記下指令、結束碼、輸出雜湊，並收進同一份內容的審查紀錄。
+   - 證據存成 `.ai/verifications/<內容雜湊>.json`，跟改動一起 commit。
+   - 內容雜湊不含 `.ai/`，所以更新看板或 HANDOFF 不會讓證據失效；改了任何程式碼就會失效。
+   - CI 的 `gate` 在 PR 上檢查：這份內容有通過的檢查，而且有一份由**作者以外**的 agent 給出的 `ship` 審查。缺一項就擋下合併。
 6. **結束必交接**：暫停或換手前，用 `handoff` skill 覆寫 `.ai/HANDOFF.md`。
 
 ## 三種協作模式

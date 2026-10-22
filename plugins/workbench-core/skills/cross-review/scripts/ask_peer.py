@@ -5,7 +5,8 @@
   python ask_peer.py --base main --goal "..."                # diff against a branch
   python ask_peer.py --question "why does X fail?" --files a.py b.py
 
-Prints the peer's verdict and saves it under .ai/reviews/. Stdlib only.
+Prints the peer's verdict and saves it under .ai/reviews/ as markdown plus a JSON record (verdict, peer,
+author, content id) that verify.py can attach as evidence. Stdlib only.
 Exit codes: 0 ok, 1 peer failed, 2 peer CLI not found, 3 nothing to review.
 """
 from __future__ import annotations
@@ -13,7 +14,9 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import glob
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -128,16 +131,55 @@ def peer_command(peer: str, binary: str, model: str | None, out_file: str) -> li
     return cmd
 
 
-def save_review(root: Path, peer: str, args, verdict: str) -> Path:
+def content_id(root: Path) -> str | None:
+    """Tree id of the working tree without .ai/. Keep in sync with content_id() in verify/scripts/verify.py."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": os.path.join(tmp, "index")}
+        start = ["read-tree", "HEAD"] if git("rev-parse", "--verify", "-q", "HEAD^{commit}").strip() \
+            else ["read-tree", "--empty"]
+        out = ""
+        for step in (start, ["add", "-A"], ["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", ".ai"],
+                     ["write-tree"]):
+            r = run(["git", "-C", str(root), *step], env=env)
+            if r.returncode != 0:
+                return None
+            out = r.stdout.strip()
+        return out or None
+
+
+def detect_host() -> str:
+    if os.environ.get("CLAUDECODE"):
+        return "claude"
+    if os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SANDBOX"):
+        return "codex"
+    return "human"
+
+
+def parse_verdict(text: str) -> tuple[str | None, str | None, int]:
+    verdict = re.search(r"^\s*VERDICT:\s*(ship|fix-first|rethink)\b", text, re.M | re.I)
+    confidence = re.search(r"^\s*CONFIDENCE:\s*(high|med|low)\b", text, re.M | re.I)
+    findings = len(re.findall(r"^\s*- \[(?:high|med|low)\]", text, re.M | re.I))
+    return (verdict.group(1).lower() if verdict else None,
+            confidence.group(1).lower() if confidence else None, findings)
+
+
+def save_review(root: Path, peer: str, author: str, cid: str | None, args, reply: str) -> tuple[Path, Path]:
     stamp = dt.datetime.now(dt.timezone.utc)
     out_dir = root / ".ai" / "reviews"
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{stamp:%Y%m%d-%H%M%S}-{peer}.md"
-    sha = git("rev-parse", "--short", "HEAD").strip() or "no-commit"
+    sha = git("rev-parse", "HEAD").strip()
     scope = f"question: {args.question}" if args.question else f"diff vs {args.base or 'HEAD (uncommitted)'}"
-    header = f"# Cross-review by {peer} — {stamp:%Y-%m-%d %H:%M} UTC @ {sha}\n- scope: {scope}\n- goal: {args.goal or '-'}\n\n"
-    path.write_text(header + verdict.strip() + "\n", encoding="utf-8")
-    return path
+    header = (f"# Cross-review by {peer} — {stamp:%Y-%m-%d %H:%M} UTC @ {sha[:7] or 'no-commit'}\n"
+              f"- scope: {scope}\n- goal: {args.goal or '-'}\n- content: {cid or 'unknown'}\n\n")
+    path.write_text(header + reply.strip() + "\n", encoding="utf-8")
+    verdict, confidence, findings = parse_verdict(reply) if not args.question else (None, None, 0)
+    record = {"at": f"{stamp:%Y-%m-%dT%H:%M:%SZ}", "peer": peer, "author": author, "content": cid,
+              "head": sha or None, "scope": scope, "goal": args.goal, "verdict": verdict,
+              "confidence": confidence, "findings": findings, "review_file": path.name}
+    json_path = path.with_suffix(".json")
+    json_path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return path, json_path
 
 
 def main() -> int:
@@ -151,10 +193,13 @@ def main() -> int:
     ap.add_argument("--max-chars", type=int, default=60000, help="cap on context sent (default 60000, about 15k tokens)")
     ap.add_argument("--timeout", type=int, default=600, help="seconds (default 600)")
     ap.add_argument("--dry-run", action="store_true", help="print the command and prompt size; do not call the peer")
+    ap.add_argument("--author", choices=["claude", "codex", "human"], help="who wrote the change (default: detected)")
     args = ap.parse_args()
 
     peer = args.peer if args.peer != "auto" else ("codex" if os.environ.get("CLAUDECODE") else "claude")
+    author = args.author or detect_host()
     root = Path(git("rev-parse", "--show-toplevel").strip() or os.getcwd())
+    cid = content_id(root)  # the exact state the peer is about to review
 
     try:
         context, fmt = build_context(args)
@@ -190,12 +235,12 @@ def main() -> int:
             print("\n".join(r.stderr.strip().splitlines()[-15:]))
             return 1
 
-    path = save_review(root, peer, args, verdict)
+    path, json_path = save_review(root, peer, author, cid, args, verdict)
     lines = verdict.strip().splitlines()
     print("\n".join(lines[:PRINT_LINES]))
     if len(lines) > PRINT_LINES:
         print(f"[{len(lines) - PRINT_LINES} more lines in the saved review]")
-    print(f"\nsaved: {path.relative_to(root).as_posix()}")
+    print(f"\nsaved: {path.relative_to(root).as_posix()} and {json_path.name} (content {(cid or 'unknown')[:12]})")
     return 0
 
 

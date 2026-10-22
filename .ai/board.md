@@ -7,6 +7,7 @@ Times are UTC. Once a lease time has passed, anyone may take the task.
 |----|------|-------|--------|--------------------|-------------|------|
 | T2 | Try `handoff` and `cross-review` in real Claude Code and Codex sessions | - | open | plugins/workbench-core/skills/ | - | Claude → Codex passed on 2026-10-16; Codex → Claude still to do |
 | T3 | Write `claude plugin eval` cases for both skills | - | open | plugins/workbench-core/evals/ | - | needs Claude Code 2.1.269 or later |
+| T6 | Opportunity #7: evidence-based cross-verification and a merge gate | claude@feat/verify-gate | claimed | plugins/workbench-core/, tests/test_verify.py, .github/workflows/, .ai/verify.json, docs/ | 2026-10-22 07:44 | lease T6 held |
 
 ## Done
 | id | task | owner | finished | evidence |
