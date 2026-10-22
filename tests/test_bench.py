@@ -70,6 +70,7 @@ class CodexModelTest(unittest.TestCase):
         self.assertEqual(bench.codex_model(["codex", "exec", "-m", "gpt-x", "-"]), "gpt-x")
         self.assertEqual(bench.codex_model(["codex", "exec", "--model", "gpt-y", "-"]), "gpt-y")
         self.assertEqual(bench.codex_model(["codex", "exec", "-"]), "unpinned")
+        self.assertEqual(bench.codex_model(["codex", "exec", "-m", "common", "-m", "arm", "-"]), "arm")
 
     def test_report_warns_when_codex_model_is_not_pinned(self):
         exp = {"name": "x", "arms": [{"name": "a"}]}
@@ -87,11 +88,19 @@ class StatsTest(unittest.TestCase):
 
     def test_bootstrap_needs_three_values_and_detects_a_clear_difference(self):
         self.assertIsNone(bench.bootstrap_ci([1.0, 2.0], random.Random(0)))
-        ci = bench.bootstrap_diff([10.0, 11.0, 12.0, 10.5], [5.0, 5.5, 6.0, 5.2], random.Random(0))
+        base = dict(enumerate([10.0, 11.0, 12.0, 10.5]))
+        ci = bench.bootstrap_paired(base, dict(enumerate([5.0, 5.5, 6.0, 5.2])), random.Random(0))
         self.assertLess(ci[1], 0)
         self.assertEqual(bench.verdict(ci), "lower")
         self.assertEqual(bench.verdict((-1.0, 2.0)), "no clear difference")
         self.assertEqual(bench.verdict(None), "too few runs")
+
+    def test_paired_difference_uses_only_rounds_both_arms_ran(self):
+        # Round drift hits both arms alike; pairing by round cancels it.
+        base = {0: 100.0, 1: 200.0, 2: 300.0, 3: 400.0}
+        other = {0: 90.0, 1: 190.0, 2: 290.0, 3: 390.0, 4: 1.0}
+        self.assertEqual(bench.bootstrap_paired(base, other, random.Random(0)), (-10.0, -10.0))
+        self.assertIsNone(bench.bootstrap_paired({0: 1.0, 1: 2.0}, {0: 1.0, 1: 2.0}, random.Random(0)))
 
     def test_schedule_interleaves_arms_every_round(self):
         exp = {"arms": [{"name": n} for n in "abcd"]}
@@ -125,6 +134,24 @@ class ExperimentTest(unittest.TestCase):
                     {**base, "task": {"prompt": "p", "fixture": "missing"}}, {**base, "task": {}}):
             with self.assertRaises(bench.BenchError):
                 bench.load_experiment(self.write_exp(bad))
+
+    def test_arm_files_cannot_leave_the_workspace(self):
+        for dest in ("../evil.txt", "/etc/evil", "C:/evil.txt", "a/../../evil.txt"):
+            exp = {"name": "x", "task": {"prompt": "p"}, "arms": [{"name": "a", "files": {dest: "x"}}]}
+            with self.assertRaises(bench.BenchError, msg=dest):
+                bench.load_experiment(self.write_exp(exp))
+
+    def test_claude_gets_no_shell_unless_the_experiment_asks(self):
+        exp = bench.load_experiment(EXPERIMENTS / "lean-instructions.json")
+        cmd = bench.build_command("claude", "claude", exp, exp["arms"][0], Path("w"))
+        self.assertNotIn("Bash", cmd[cmd.index("--allowedTools") + 1])
+        exp["task"]["claude_allowed_tools"] = "Read,Edit,Bash(python:*)"
+        path = self.write_exp({k: v for k, v in exp.items() if not k.startswith("_")} | {
+            "task": {**exp["task"], "fixture": None}, "arms": [{"name": "a"}]})
+        buf = io.StringIO()
+        with mock.patch.object(bench, "find_binary", lambda host: "bin"), contextlib.redirect_stdout(buf):
+            bench.main(["plan", str(path), "--hosts", "claude"])
+        self.assertIn("not confined to the temporary workspace", buf.getvalue())
 
     def test_workspace_gets_fixture_arm_files_and_a_commit(self):
         exp = bench.load_experiment(EXPERIMENTS / "lean-instructions.json")
@@ -166,7 +193,8 @@ class RunTest(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(bench, "execute", self.fake_execute), \
                 mock.patch.object(bench, "find_binary", lambda host: "claude-bin"), \
-                mock.patch.dict(os.environ, {"CLAUDECODE": "1"}), contextlib.redirect_stdout(buf):
+                mock.patch.dict(os.environ, {"CLAUDECODE": "1"}), contextlib.redirect_stdout(buf), \
+                contextlib.redirect_stderr(buf):
             code = bench.main(argv)
         return code, buf.getvalue()
 
@@ -193,9 +221,28 @@ class RunTest(unittest.TestCase):
         self.assertEqual(len(bench.load_runs(self.out)), 2)
         self.run_bench("--runs", "1")
         self.assertEqual(len(bench.load_runs(self.out)), 2)
-        code, out = self.run_bench("--runs", "3", "--max-cost", "0.01")
+        code, out = self.run_bench("--runs", "3", "--max-cost", "0.08")  # 0.07 already spent before resuming
         self.assertIn("stopped", out)
-        self.assertEqual(len(bench.load_runs(self.out)), 3)
+        self.assertEqual(len(bench.load_runs(self.out)), 2)
+
+    def test_max_cost_needs_codex_prices(self):
+        code, out = self.run_bench("--hosts", "codex", "--max-cost", "1")
+        self.assertEqual(code, 2)
+
+    def test_resume_refuses_a_changed_experiment(self):
+        import shutil
+        copy = Path(self.tmp.name) / "examples"
+        shutil.copytree(SKILL / "examples", copy)
+        exp_path = copy / "experiments" / "lean-instructions.json"
+        argv = ["run", str(exp_path), "--yes", "--hosts", "claude", "--runs", "1", "--out", str(self.out)]
+        with mock.patch.object(bench, "execute", self.fake_execute),                 mock.patch.object(bench, "find_binary", lambda host: "claude-bin"),                 contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(bench.main(argv), 0)
+            data = json.loads(exp_path.read_text(encoding="utf-8"))
+            data["task"]["prompt"] = "A different task."
+            exp_path.write_text(json.dumps(data), encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(bench.main(argv), 2)
+        self.assertIn("different experiment", err.getvalue())
 
 
 if __name__ == "__main__":

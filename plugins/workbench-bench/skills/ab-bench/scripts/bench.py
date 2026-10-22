@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import glob
+import hashlib
 import json
 import math
 import os
@@ -35,8 +36,10 @@ for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", errors="replace")
 
 HOSTS = ("claude", "codex")
-CLAUDE_ALLOWED = "Read,Edit,Write,Glob,Grep,Bash(python:*)"
+# Claude confines Edit and Write to its working directory; Bash would not be confined, so it is opt-in.
+CLAUDE_ALLOWED = "Read,Edit,Write,Glob,Grep"
 BOOTSTRAP_ITERS = 2000
+FIXTURE_IGNORE = ("__pycache__", "*.pyc")
 
 
 class BenchError(Exception):
@@ -72,7 +75,38 @@ def load_experiment(path: Path) -> dict:
         for rel in (arm.get("files_from") or {}).values():
             if not (base / rel).is_file():
                 raise BenchError(f"arm {arm['name']}: file {rel} not found")
+        for dest in list((arm.get("files_from") or {})) + list((arm.get("files") or {})):
+            if not safe_relative(dest):
+                raise BenchError(f"arm {arm['name']}: '{dest}' must be a relative path inside the workspace")
     return exp
+
+
+def safe_relative(rel: str) -> bool:
+    parts = Path(rel.replace("\\", "/")).parts
+    return bool(parts) and not Path(rel).is_absolute() and not rel.startswith(("/", "\\")) \
+        and ":" not in parts[0] and ".." not in parts
+
+
+def fingerprint(exp: dict, seed: int) -> str:
+    """Identity of an experiment for resuming: its settings (except the run count), the seed, and the bytes of
+    its fixture and arm files. Results made under a different fingerprint must not be mixed."""
+    h = hashlib.sha256()
+    h.update(json.dumps({k: v for k, v in exp.items() if not k.startswith("_") and k != "runs"},
+                        sort_keys=True).encode("utf-8"))
+    h.update(f"seed={seed}".encode())
+    base = exp["_base"]
+    sources = []
+    fixture = exp["task"].get("fixture")
+    if fixture:
+        root = base / fixture
+        sources += [(f"fixture/{p.relative_to(root).as_posix()}", p) for p in sorted(root.rglob("*"))
+                    if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"]
+    for arm in exp["arms"]:
+        sources += [(f"{arm['name']}/{dest}", base / src) for dest, src in (arm.get("files_from") or {}).items()]
+    for label, path in sources:
+        h.update(label.encode("utf-8"))
+        h.update(path.read_bytes())
+    return h.hexdigest()[:16]
 
 
 def first_file(candidates: list[str | None]) -> str | None:
@@ -112,18 +146,23 @@ def git(cwd: Path, *args: str) -> None:
 
 
 def prepare_workspace(exp: dict, arm: dict) -> Path:
-    workspace = Path(tempfile.mkdtemp(prefix="wb-bench-"))
+    workspace = Path(tempfile.mkdtemp(prefix="wb-bench-")).resolve()
     fixture = exp["task"].get("fixture")
     if fixture:
-        shutil.copytree(exp["_base"] / fixture, workspace, dirs_exist_ok=True)
+        shutil.copytree(exp["_base"] / fixture, workspace, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns(*FIXTURE_IGNORE))
+
+    def target(rel: str) -> Path:
+        path = (workspace / rel).resolve()
+        if not path.is_relative_to(workspace):
+            raise BenchError(f"arm {arm['name']}: '{rel}' resolves outside the workspace")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
     for rel, src in (arm.get("files_from") or {}).items():
-        target = workspace / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(exp["_base"] / src, target)
+        shutil.copyfile(exp["_base"] / src, target(rel))
     for rel, text in (arm.get("files") or {}).items():
-        target = workspace / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
+        target(rel).write_text(text, encoding="utf-8")
     git(workspace, "init", "-q")
     git(workspace, "add", "-A")
     git(workspace, "commit", "-q", "--allow-empty", "-m", "bench fixture")
@@ -253,10 +292,11 @@ def agent_env(exp: dict, arm: dict) -> dict:
 
 def codex_model(cmd: list[str]) -> str:
     """Codex's JSON events do not name the model, so record the one pinned on the command line, if any."""
-    for flag in ("-m", "--model"):
-        if flag in cmd[:-1]:
-            return cmd[cmd.index(flag) + 1]
-    return "unpinned"
+    model = "unpinned"
+    for i, arg in enumerate(cmd[:-1]):
+        if arg in ("-m", "--model"):
+            model = cmd[i + 1]  # the last occurrence wins, as for the CLI itself
+    return model
 
 
 def run_one(exp: dict, host: str, arm: dict, rnd: int, binary: str, keep: bool) -> dict:
@@ -293,6 +333,8 @@ def cmd_plan(args) -> int:
         for arm in exp["arms"]:
             cmd = build_command(host, binary or host, exp, arm, Path("<workspace>"))
             print(f"  {arm['name']}: {' '.join(cmd)}  < prompt on stdin")
+            if host == "claude" and any("Bash" in a for a in cmd):
+                print("    warning: this grants Claude a shell, which is not confined to the temporary workspace")
     total = runs * len(hosts) * len(exp["arms"])
     print(f"\n{total} agent runs ({runs} rounds x {len(hosts)} host(s) x {len(exp['arms'])} arm(s)). "
           "Each one spends real quota or money. Add --yes to `run` to start, and --max-cost to cap the spend.")
@@ -311,20 +353,41 @@ def cmd_run(args) -> int:
     missing = [h for h, b in binaries.items() if not b]
     if missing:
         raise BenchError(f"CLI not found for: {', '.join(missing)}")
+    if args.max_cost is not None and "codex" in hosts and not (exp.get("prices") or {}).get("codex"):
+        raise BenchError("--max-cost needs a measurable cost, but Codex reports tokens only. Add "
+                         '"prices": {"codex": {"input": .., "cached_input": .., "output": ..}} or drop --max-cost')
+    fp = fingerprint(exp, args.seed)
     out_dir = Path(args.out or Path(".ai") / "bench" / f"{exp['name']}-{dt.datetime.now():%Y%m%d-%H%M%S}")
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "experiment.json").write_text(
-        json.dumps({k: v for k, v in exp.items() if k != "_base"}, indent=2, ensure_ascii=False), encoding="utf-8")
-    done = {(r["host"], r["arm"], r["round"]) for r in load_runs(out_dir)}
-    spent = 0.0
+    saved = out_dir / "experiment.json"
+    if saved.is_file():
+        previous = json.loads(saved.read_text(encoding="utf-8")).get("fingerprint")
+        if previous != fp:
+            raise BenchError(f"{out_dir} holds results of a different experiment, seed or fixture "
+                             f"({previous} vs {fp}); use a new --out")
+    else:
+        saved.write_text(json.dumps({"fingerprint": fp, "seed": args.seed,
+                                     **{k: v for k, v in exp.items() if not k.startswith("_")}},
+                                    indent=2, ensure_ascii=False), encoding="utf-8")
+    history = load_runs(out_dir)
+    done = {(r["host"], r["arm"], r["round"]) for r in history}
+    spent = sum(r.get("cost_usd") or 0.0 for r in history)  # a resumed run counts what was already spent
     with results_path(out_dir).open("a", encoding="utf-8") as fh:
         for rnd, host, arm in schedule(exp, hosts, runs, args.seed):
             if (host, arm["name"], rnd) in done:
                 continue
-            if args.max_cost is not None and spent >= args.max_cost:
-                print(f"stopped: spent ${spent:.2f}, reaching --max-cost {args.max_cost}. Run again to resume.")
-                break
+            if args.max_cost is not None:
+                same = [r["cost_usd"] for r in history
+                        if r["host"] == host and r["arm"] == arm["name"] and r.get("cost_usd") is not None]
+                estimate = statistics.fmean(same) if same else 0.0
+                if spent >= args.max_cost or spent + estimate > args.max_cost:
+                    print(f"stopped before {host}/{arm['name']} round {rnd}: spent ${spent:.4f}; the next run is "
+                          f"estimated at ${estimate:.4f} against --max-cost {args.max_cost}. A single run can still "
+                          "exceed the estimate. Run again with a higher cap to resume.")
+                    break
             record = run_one(exp, host, arm, rnd, binaries[host], args.keep)
+            record["fingerprint"] = fp
+            history.append(record)
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
             fh.flush()
             spent += record.get("cost_usd") or 0.0
@@ -356,12 +419,19 @@ def bootstrap_ci(values: list[float], rng: random.Random) -> tuple[float, float]
     return means[int(0.025 * BOOTSTRAP_ITERS)], means[int(0.975 * BOOTSTRAP_ITERS) - 1]
 
 
-def bootstrap_diff(base: list[float], other: list[float], rng: random.Random) -> tuple[float, float] | None:
-    if len(base) < 3 or len(other) < 3:
+def bootstrap_paired(base: dict[int, float], other: dict[int, float], rng: random.Random) -> tuple[float, float] | None:
+    """95% interval of the mean per-round difference (other - base). Arms run in the same rounds, so pairing by
+    round removes drift that hits both arms alike."""
+    rounds = sorted(set(base) & set(other))
+    if len(rounds) < 3:
         return None
-    diffs = sorted(statistics.fmean(rng.choices(other, k=len(other))) - statistics.fmean(rng.choices(base, k=len(base)))
-                   for _ in range(BOOTSTRAP_ITERS))
-    return diffs[int(0.025 * BOOTSTRAP_ITERS)], diffs[int(0.975 * BOOTSTRAP_ITERS) - 1]
+    diffs = [other[r] - base[r] for r in rounds]
+    means = sorted(statistics.fmean(rng.choices(diffs, k=len(diffs))) for _ in range(BOOTSTRAP_ITERS))
+    return means[int(0.025 * BOOTSTRAP_ITERS)], means[int(0.975 * BOOTSTRAP_ITERS) - 1]
+
+
+def by_round(group: list[dict], key: str) -> dict[int, float]:
+    return {r["round"]: float(r[key]) for r in group if r.get(key) is not None}
 
 
 def fmt_num(value: float | None, money: bool = False) -> str:
@@ -389,6 +459,10 @@ def build_report(runs: list[dict], exp: dict, seed: int = 0) -> str:
     lines = [f"# Benchmark: {exp['name']}", "", exp.get("description", ""), "",
              f"{len(runs)} runs. Cost is reported by Claude Code and estimated for Codex when prices are given. "
              "Intervals are 95% (Wilson for success, bootstrap for means); fewer than 3 runs per arm shows none.", ""]
+    fingerprints = {r.get("fingerprint") for r in runs if r.get("fingerprint")}
+    if len(fingerprints) > 1:
+        lines += [f"**Warning:** these runs come from {len(fingerprints)} different experiment versions; "
+                  "compare them only with care.", ""]
     arm_order = [a["name"] for a in exp["arms"]]
     for host in [h for h in HOSTS if any(r["host"] == h for r in runs)]:
         lines += [f"## {host}", "",
@@ -416,15 +490,13 @@ def build_report(runs: list[dict], exp: dict, seed: int = 0) -> str:
         base_name = next((name for name in arm_order if groups.get(name)), None)
         others = [name for name in arm_order if name != base_name and groups.get(name)]
         if base_name and others:
-            lines += ["", f"Difference from `{base_name}` (negative means the arm uses less):", "",
+            lines += ["", f"Difference from `{base_name}`, paired by round (negative means the arm uses less):", "",
                       "| arm | cost per run [95% CI] | verdict | total input [95% CI] | verdict |", "|---|---|---|---|---|"]
             base = groups[base_name]
             for name in others:
                 group = groups[name]
-                cost_ci = bootstrap_diff([r["cost_usd"] for r in base if r.get("cost_usd") is not None],
-                                         [r["cost_usd"] for r in group if r.get("cost_usd") is not None], rng)
-                input_ci = bootstrap_diff([float(r.get("total_input") or 0) for r in base],
-                                          [float(r.get("total_input") or 0) for r in group], rng)
+                cost_ci = bootstrap_paired(by_round(base, "cost_usd"), by_round(group, "cost_usd"), rng)
+                input_ci = bootstrap_paired(by_round(base, "total_input"), by_round(group, "total_input"), rng)
                 lines.append(f"| {name} | {fmt_ci(cost_ci, True) or 'n/a'} | {verdict(cost_ci)} | "
                              f"{fmt_ci(input_ci) or 'n/a'} | {verdict(input_ci)} |")
         if host == "codex" and any(r.get("model") == "unpinned" for r in runs if r["host"] == host):
