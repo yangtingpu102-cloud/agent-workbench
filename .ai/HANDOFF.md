@@ -1,25 +1,23 @@
-# Handoff — 2026-10-17 07:00 UTC — claude:a1 on feat/lease-hooks @ 4eafd64+1
+# Handoff — 2026-10-22 05:15 UTC — claude:a1 on feat/verify-gate
 ## Goal
-Ship opportunity #6: the workbench-lease plugin, file leases per branch enforced by PreToolUse hooks in Claude Code and Codex.
+Ship opportunity #7: evidence records tied to exact content, and a merge gate that needs a passing run plus a full, independent ship review.
 ## State
-review: Codex cross-reviewed and live-tested in Codex; PR open against main. Claude live test still pending.
+review: Codex said ship on round 6; evidence recorded; PR open against main.
 ## Done
-- lease.py claim/renew/release/list/check/hook; leases in <git common dir>/agent-leases, owned by branch (evidence: `python -m unittest discover -s tests` → 35 tests OK)
-- Hook denies through stdout JSON and always exits 0, because PowerShell turns exit 2 into 1 (evidence: HookConfigTest runs the exact codex.hooks.json command via `powershell -NoProfile -Command` → deny)
-- Claude hooks/hooks.json (exec form `python` + args) and Codex hooks/codex.hooks.json (`commandWindows`, `$env:PLUGIN_ROOT`, matcher apply_patch|Bash) (evidence: `claude plugin validate plugins/workbench-lease --strict` → passed)
-- Codex live test: real `codex exec` 0.162 in this repo with a lease held by another worktree → apply_patch denied, README unchanged, LEASE_HOOK_LOG recorded the call; `$env:PLUGIN_ROOT` expanded, so the review's cmd.exe claim did not hold
-- Codex review: 7 findings; fixed atomic publish (hard link), claim lock (mutation check: without it 4 of 4 concurrent claims won), scope validation, conservative glob overlap, patch markers read only without an explicit target (evidence: 39 tests OK)
+- verify.py run/collect/gate/show/content; content id = git tree without .ai/ but with .ai/verify.json (evidence: 66 tests OK)
+- Gate: latest run passes the PR's checks and the current base's checks by name and command; latest independent review is ship, complete, and covers the change since the merge base (evidence: one test per Codex finding, 17 findings over 6 rounds)
+- cross-review writes JSON records (id, verdict, complete, base_sha = merge base, content id)
+- CI `gate` job runs `verify.py gate --base <PR base sha>` on pull requests
 ## Next
-1. Merge the PR once CI passes
-2. Live test in Claude after the user re-logs in the CLI: `claude -p --plugin-dir plugins/workbench-lease --permission-mode acceptEdits` in a worktree of a leased temp repo (unset CLAUDECODE first)
+1. Merge the PR when CI is green; from then on every PR needs committed evidence
+2. Opportunity #1: A/B token benchmark across Claude Code and Codex
+3. Board T2: Codex -> Claude cross-review from inside Codex (needs `claude` CLI re-login)
 ## Files
-- plugins/workbench-lease/skills/lease/scripts/lease.py: all logic; `LEASE_HOOK_LOG` writes one JSON line per hook call
-- plugins/workbench-lease/hooks/: hooks.json (Claude), codex.hooks.json (Codex, referenced from .codex-plugin/plugin.json)
-- tests/test_lease.py: RepoCase builds a repo + worktree; HookConfigTest runs the configured commands
+- plugins/workbench-core/skills/verify/scripts/verify.py, plugins/workbench-core/skills/cross-review/scripts/ask_peer.py
+- .ai/verify.json: checks and require_review; .ai/verifications/: committed evidence
 ## Verify
-`python -m unittest discover -s tests && python scripts/wb.py validate`
+`python plugins/workbench-core/skills/verify/scripts/verify.py gate --base origin/main`
 ## Gotchas
-- Codex hook payload for edits: tool_name apply_patch, tool_input {"command": "<patch>"}; shell calls are tool_name Bash (from source, rust-v0.162.0; not yet seen live).
-- Codex skips plugin hooks until trusted in /hooks.
-- Claude exec form needs `python` on PATH; without it the hook does not run (fails open).
-- The CLI `claude` here reported "OAuth session expired"; the desktop app is unaffected.
+- Review against the remote base (`--base origin/main`) when local main has unpushed commits, or CI's coverage check fails.
+- `run` refuses a dirty tree; changes under .ai/ (except verify.json) never invalidate evidence.
+- Heredocs in this shell turn `\n` into real newlines; edit Python string escapes with the Edit tool.

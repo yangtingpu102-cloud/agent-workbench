@@ -5,7 +5,8 @@
   python ask_peer.py --base main --goal "..."                # diff against a branch
   python ask_peer.py --question "why does X fail?" --files a.py b.py
 
-Prints the peer's verdict and saves it under .ai/reviews/. Stdlib only.
+Prints the peer's verdict and saves it under .ai/reviews/ as markdown plus a JSON record (verdict, peer,
+author, content id) that verify.py can attach as evidence. Stdlib only.
 Exit codes: 0 ok, 1 peer failed, 2 peer CLI not found, 3 nothing to review.
 """
 from __future__ import annotations
@@ -13,11 +14,14 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import glob
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -34,6 +38,10 @@ ANSWER: at most 15 lines, concrete, naming files and lines where relevant
 CONFIDENCE: high | med | low"""
 
 PRINT_LINES = 60
+MAX_NEW_FILES = 50
+MAX_NEW_FILE_BYTES = 100_000
+# Evidence records are the output of reviews, not part of what a review judges.
+NOT_REVIEWED = (".", ":(exclude).ai/verifications")
 
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -82,27 +90,62 @@ def find_claude() -> str | None:
     return first_file([os.environ.get("WB_CLAUDE_BIN"), shutil.which("claude"), str(Path.home() / ".local" / "bin" / exe)])
 
 
-def build_context(args) -> tuple[str, str]:
+def build_context(args) -> tuple[str, str, bool | None]:
+    """Returns (context, reply format, complete). `complete` is False when the peer cannot see every
+    change (a truncated diff, or new files that are too big, binary or too many), so the review
+    must not count as evidence for the whole content."""
     if args.question:
         parts = [f"QUESTION: {args.question}"]
         for f in args.files or []:
             text = Path(f).read_text(encoding="utf-8", errors="replace")
             parts.append(f"--- FILE {f} ---\n{text}")
-        return "\n\n".join(parts), ANSWER_FORMAT
-    if args.base:
-        ok, diff = git_ok("diff", args.base)
+        return "\n\n".join(parts), ANSWER_FORMAT, None
+    if args.base:  # diff from where the branch left the base, so later base commits do not leak in
+        ok, merge_base = git_ok("merge-base", args.base, "HEAD")
+        if not ok or not merge_base.strip():
+            raise UsageError(f"no merge base with '{args.base}': is it a valid ref?")
+        args.review_base = merge_base.strip()
+        ok, diff = git_ok("diff", args.review_base, "--", *NOT_REVIEWED)
         if not ok:
-            raise UsageError(f"git diff {args.base} failed: is '{args.base}' a valid ref?")
-    else:
-        diff = git("diff", "HEAD") or (git("diff", "--cached") + git("diff"))  # no HEAD yet in a new repo
-    untracked = [p for p in git("ls-files", "-z", "--others", "--exclude-standard").split("\0") if p]
+            raise UsageError(f"git diff {args.review_base} failed")
+    else:  # no HEAD yet in a new repo: fall back to staged plus unstaged changes
+        diff = git("diff", "HEAD", "--", *NOT_REVIEWED) or (
+            git("diff", "--cached", "--", *NOT_REVIEWED) + git("diff", "--", *NOT_REVIEWED))
+    untracked = [p for p in git("ls-files", "-z", "--others", "--exclude-standard", "--", *NOT_REVIEWED).split("\0")
+                 if p]
     if not diff.strip() and not untracked:
-        return "", ""
+        return "", "", None
+    binary_change = re.search(r"^(Binary files .+ differ|GIT binary patch)$", diff, re.M)
+    complete = len(untracked) <= MAX_NEW_FILES and not binary_change  # git shows no content for binary changes
+    new_files = []
+    for rel in untracked[:MAX_NEW_FILES]:
+        try:
+            data = Path(rel).read_bytes()
+        except OSError:
+            complete = False
+            continue
+        if len(data) > MAX_NEW_FILE_BYTES or b"\0" in data:
+            complete = False
+            continue
+        new_files.append(f"--- NEW FILE {rel} ---\n{data.decode('utf-8', errors='replace')}")
     head = f"GOAL OF THE CHANGE: {args.goal or '(not given)'}"
-    tail = "UNTRACKED FILES (read them if relevant):\n" + "\n".join(untracked[:50]) if untracked else ""
-    # Truncate only the diff so the goal and the untracked list always reach the peer.
-    diff = truncate(diff or "(no tracked changes)", max(1000, args.max_chars - len(head) - len(tail) - 200))
-    return "\n".join(p for p in (head, "--- DIFF ---", diff, tail) if p), REVIEW_FORMAT
+    tail = "UNTRACKED FILES:\n" + "\n".join(untracked[:MAX_NEW_FILES]) if untracked else ""
+    body = "\n".join([diff or "(no tracked changes)"] + new_files)
+    # Truncate only the changes so the goal and the list of new files always reach the peer.
+    budget = max(1000, args.max_chars - len(head) - len(tail) - 200)
+    if len(body) > budget:
+        complete = False
+    body = truncate(body, budget)
+    return "\n".join(p for p in (head, "--- CHANGES ---", body, tail) if p), REVIEW_FORMAT, complete
+
+
+def evidence_complete(complete: bool | None, context: str, max_chars: int, cid_before: str | None,
+                      cid_after: str | None) -> bool | None:
+    """A review counts as evidence only if the peer got every change in the prompt actually sent and the
+    content did not change while it was reviewing."""
+    if complete is None:
+        return None
+    return bool(complete and len(context) <= max_chars and cid_before and cid_before == cid_after)
 
 
 def build_prompt(context: str, fmt: str, max_chars: int) -> str:
@@ -128,16 +171,60 @@ def peer_command(peer: str, binary: str, model: str | None, out_file: str) -> li
     return cmd
 
 
-def save_review(root: Path, peer: str, args, verdict: str) -> Path:
+def content_id(root: Path) -> str | None:
+    """Tree id of the working tree without .ai/ (but with .ai/verify.json).
+    Keep in sync with content_id() in verify/scripts/verify.py."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": os.path.join(tmp, "index")}
+        start = ["read-tree", "HEAD"] if git("rev-parse", "--verify", "-q", "HEAD^{commit}").strip() \
+            else ["read-tree", "--empty"]
+        out = ""
+        for step in (start, ["add", "-A"],
+                     ["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", ".ai", ":(exclude).ai/verify.json"],
+                     ["write-tree"]):
+            r = run(["git", "-C", str(root), *step], env=env)
+            if r.returncode != 0:
+                return None
+            out = r.stdout.strip()
+        return out or None
+
+
+def detect_host() -> str:
+    if os.environ.get("CLAUDECODE"):
+        return "claude"
+    if os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SANDBOX"):
+        return "codex"
+    return "human"
+
+
+def parse_verdict(text: str) -> tuple[str | None, str | None, int]:
+    verdict = re.search(r"^\s*VERDICT:\s*(ship|fix-first|rethink)\b", text, re.M | re.I)
+    confidence = re.search(r"^\s*CONFIDENCE:\s*(high|med|low)\b", text, re.M | re.I)
+    findings = len(re.findall(r"^\s*- \[(?:high|med|low)\]", text, re.M | re.I))
+    return (verdict.group(1).lower() if verdict else None,
+            confidence.group(1).lower() if confidence else None, findings)
+
+
+def save_review(root: Path, peer: str, author: str, cid: str | None, complete: bool | None, args,
+                reply: str) -> tuple[Path, Path]:
     stamp = dt.datetime.now(dt.timezone.utc)
     out_dir = root / ".ai" / "reviews"
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{stamp:%Y%m%d-%H%M%S}-{peer}.md"
-    sha = git("rev-parse", "--short", "HEAD").strip() or "no-commit"
+    path = out_dir / f"{stamp:%Y%m%d-%H%M%S-%f}-{peer}.md"
+    sha = git("rev-parse", "HEAD").strip()
     scope = f"question: {args.question}" if args.question else f"diff vs {args.base or 'HEAD (uncommitted)'}"
-    header = f"# Cross-review by {peer} — {stamp:%Y-%m-%d %H:%M} UTC @ {sha}\n- scope: {scope}\n- goal: {args.goal or '-'}\n\n"
-    path.write_text(header + verdict.strip() + "\n", encoding="utf-8")
-    return path
+    header = (f"# Cross-review by {peer} — {stamp:%Y-%m-%d %H:%M} UTC @ {sha[:7] or 'no-commit'}\n"
+              f"- scope: {scope}\n- goal: {args.goal or '-'}\n- content: {cid or 'unknown'}\n\n")
+    path.write_text(header + reply.strip() + "\n", encoding="utf-8")
+    verdict, confidence, findings = parse_verdict(reply) if not args.question else (None, None, 0)
+    base_sha = None if args.question else (getattr(args, "review_base", None) if args.base else sha) or None
+    record = {"id": uuid.uuid4().hex, "at": f"{stamp:%Y-%m-%dT%H:%M:%S.%fZ}", "peer": peer, "author": author,
+              "content": cid, "complete": complete, "head": sha or None, "base_sha": base_sha, "scope": scope,
+              "goal": args.goal, "verdict": verdict,
+              "confidence": confidence, "findings": findings, "review_file": path.name}
+    json_path = path.with_suffix(".json")
+    json_path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return path, json_path
 
 
 def main() -> int:
@@ -151,13 +238,16 @@ def main() -> int:
     ap.add_argument("--max-chars", type=int, default=60000, help="cap on context sent (default 60000, about 15k tokens)")
     ap.add_argument("--timeout", type=int, default=600, help="seconds (default 600)")
     ap.add_argument("--dry-run", action="store_true", help="print the command and prompt size; do not call the peer")
+    ap.add_argument("--author", choices=["claude", "codex", "human"], help="who wrote the change (default: detected)")
     args = ap.parse_args()
 
     peer = args.peer if args.peer != "auto" else ("codex" if os.environ.get("CLAUDECODE") else "claude")
+    author = args.author or detect_host()
     root = Path(git("rev-parse", "--show-toplevel").strip() or os.getcwd())
+    cid = content_id(root)  # the exact state the peer is about to review
 
     try:
-        context, fmt = build_context(args)
+        context, fmt, complete = build_context(args)
     except UsageError as e:
         print(e)
         return 1
@@ -190,12 +280,16 @@ def main() -> int:
             print("\n".join(r.stderr.strip().splitlines()[-15:]))
             return 1
 
-    path = save_review(root, peer, args, verdict)
+    complete = evidence_complete(complete, context, args.max_chars, cid, content_id(root))
+    path, json_path = save_review(root, peer, author, cid, complete, args, verdict)
     lines = verdict.strip().splitlines()
     print("\n".join(lines[:PRINT_LINES]))
     if len(lines) > PRINT_LINES:
         print(f"[{len(lines) - PRINT_LINES} more lines in the saved review]")
-    print(f"\nsaved: {path.relative_to(root).as_posix()}")
+    print(f"\nsaved: {path.relative_to(root).as_posix()} and {json_path.name} (content {(cid or 'unknown')[:12]})")
+    if complete is False:
+        print("note: the peer did not see every change (truncated, new files omitted, or files changed during the "
+              "review), so this review does not count as evidence. Raise --max-chars or review again.")
     return 0
 
 

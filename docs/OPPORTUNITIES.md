@@ -41,7 +41,7 @@
 | # | 題目 | 缺口 | 最接近的現有專案 | MVP | 難度 |
 |---|---|---|---|---|---|
 | 6 | **不綁廠商的檔案式 lease，加上雙邊 hook 強制**（v0.1 已實作為 `workbench-lease` plugin） | Claude agent teams 的 claim 放在 `~/.claude/teams`，只限 Claude。mcp_agent_mail 需要伺服器。agent-sync 只有 Claude 端會強制。 | agent-sync（4★）、OpenMOSS/claude-codex-handoff（42★） | 本 repo 的協定 v0.1，加上 Claude 和 Codex 的 `PreToolUse` hook 擋下他人租約中的檔案，並支援 worktree 共用看板 | 中 ⭐ |
-| 7 | **附證據的交叉驗證紀錄** | 現有審查只回傳文字，沒有紀錄跑了什麼指令、exit code 和測的是哪個 commit。 | codex-plugin-cc 的 Stop-hook review gate | 把 `cross-review` 的紀錄改成 JSON schema，再加 `wb.py verify-gate` 在 merge 前檢查 | 低–中 ⭐ |
+| 7 | **附證據的交叉驗證紀錄**（v0.1 已實作為 `verify` skill 與 CI gate） | 現有審查只回傳文字，沒有紀錄跑了什麼指令、exit code 和測的是哪個 commit。 | codex-plugin-cc 的 Stop-hook review gate | 把 `cross-review` 的紀錄改成 JSON schema，再加 `wb.py verify-gate` 在 merge 前檢查 | 低–中 ⭐ |
 | 8 | **結構化交接 schema，加上接續成本量測** | 現有轉換器讀的是未公開的 session 格式，會掉 tool calls，也沒人公布「接續」對比「重來」省多少。 | cli-continues | `handoff` 的 JSON 版本，量測和 #1 共用同一個框架 | 低 ⭐ |
 | 9 | **訂閱額度感知的任務分派**（Claude Max、ChatGPT Plus） | 現有 router 都只針對 API 費用。Claude 沒有直接提供剩餘額度百分比，只能在碰到 rate-limit 錯誤後才反應。 | quota-router（0★，不支援 Windows）、codeburn `quota` | 依剩餘額度和 reset 時間建議下一個任務交給誰 | 高（資料來源不穩，建議後期再做） |
 | 10 | **編輯前的跨 worktree 衝突偵測**（雙邊） | Clash 只有 Claude 端的 hook，而且只看到檔案層級。 | Clash（65★） | 在 `PreToolUse` 時對其他 worktree 跑 `git merge-tree` | 中（可以併入 #6） |
