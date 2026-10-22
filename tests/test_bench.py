@@ -187,6 +187,12 @@ class ExperimentTest(unittest.TestCase):
         base = {"name": "x", "task": {"prompt": "p"}, "arms": [{"name": "a"}]}
         with self.assertRaises(bench.BenchError):
             bench.load_experiment(self.write_exp({**base, "prices": {"codex": {"input": 1.0, "output": 2.0}}}))
+        for bad in (float("inf"), float("nan")):
+            path = self.dir / "inf.json"
+            path.write_text(json.dumps({**base, "prices": {"codex": {"input": bad, "cached_input": 0, "output": 1}}}),
+                            encoding="utf-8")
+            with self.assertRaises(bench.BenchError):
+                bench.load_experiment(path)
         ok = bench.load_experiment(self.write_exp(
             {**base, "prices": {"codex": {"input": 1.0, "cached_input": 0.1, "output": 2.0}}}))
         self.assertIn("codex", ok["prices"])
@@ -330,6 +336,20 @@ class RunTest(unittest.TestCase):
         self.fake_execute = cheat
         self.run_bench("--runs", "1")
         self.assertFalse(any(r["success"] for r in bench.load_runs(self.out)))
+
+    def test_new_files_in_tests_fail_the_check(self):
+        def shadow(cmd, cwd, env, stdin, timeout):
+            self.calls.append({"cmd": cmd})
+            (Path(cwd) / "tests" / "calc.py").write_text(FIXED_CALC, encoding="utf-8")  # shadows the buggy module
+            return 0, CLAUDE_OUTPUT, ""
+        self.fake_execute = shadow
+        self.run_bench("--runs", "1")
+        self.assertFalse(any(r["success"] for r in bench.load_runs(self.out)))
+
+    def test_budget_and_prices_must_be_finite(self):
+        code, out = self.run_bench("--max-cost", "nan")
+        self.assertEqual(code, 2)
+        self.assertIn("finite", out)
 
     def test_expect_is_judged_on_the_full_answer(self):
         data = json.loads(CLAUDE_OUTPUT)

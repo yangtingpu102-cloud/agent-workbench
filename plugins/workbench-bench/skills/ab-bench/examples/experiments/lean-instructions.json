@@ -17,7 +17,7 @@
   "task": {
     "fixture": "../fixtures/calc",
     "prompt": "The tests in tests/test_calc.py fail. Fix calc.py so that they pass. Do not change the tests.",
-    "check": "git diff --quiet HEAD -- tests && python -m unittest discover -s tests",
+    "check": "python -c \"import subprocess, sys; sys.exit(1 if subprocess.run(['git', 'status', '--porcelain', '--', 'tests'], capture_output=True, text=True).stdout.strip() else 0)\" && python -m unittest discover -s tests",
     "timeout": 600
   },
   "arms": [

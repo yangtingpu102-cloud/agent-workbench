@@ -83,7 +83,8 @@ def load_experiment(path: Path) -> dict:
                 raise BenchError(f"arm {arm['name']}: '{dest}' must be a relative path inside the workspace")
     for host, table in (exp.get("prices") or {}).items():
         values = [table.get(k) if isinstance(table, dict) else None for k in PRICE_KEYS]
-        if not all(isinstance(v, (int, float)) and v >= 0 for v in values):
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0
+                   for v in values):
             raise BenchError(f"prices.{host} needs numbers >= 0 for {', '.join(PRICE_KEYS)} (USD per million tokens)")
     return exp
 
@@ -647,6 +648,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if getattr(args, "max_cost", None) is not None and not (math.isfinite(args.max_cost) and args.max_cost >= 0):
+            raise BenchError("--max-cost must be a finite number >= 0")  # NaN would never trigger the stop
         return {"plan": cmd_plan, "run": cmd_run, "report": cmd_report}[args.cmd](args)
     except BenchError as e:
         print(f"error: {e}", file=sys.stderr)
