@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "workbench-bench",
+  "version": "0.1.0",
+  "description": "A/B benchmark for Claude Code and Codex: billed tokens, cost, turns and success per configuration, with confidence intervals.",
+  "author": {
+    "name": "wayne yan"
+  },
+  "license": "MIT",
+  "keywords": [
+    "benchmark",
+    "token-efficiency",
+    "cost",
+    "a/b-test",
+    "codex",
+    "claude-code"
+  ]
+}

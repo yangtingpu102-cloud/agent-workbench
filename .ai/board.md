@@ -7,7 +7,7 @@ Times are UTC. Once a lease time has passed, anyone may take the task.
 |----|------|-------|--------|--------------------|-------------|------|
 | T2 | Try `handoff` and `cross-review` in real Claude Code and Codex sessions | - | open | plugins/workbench-core/skills/ | - | Claude → Codex passed on 2026-10-16; Codex → Claude still to do |
 | T3 | Write `claude plugin eval` cases for both skills | - | open | plugins/workbench-core/evals/ | - | needs Claude Code 2.1.269 or later |
-| T6 | Opportunity #7: evidence-based cross-verification and a merge gate | - | review | plugins/workbench-core/, tests/test_verify.py, .github/workflows/, .ai/verify.json, docs/ | - | PR open; Codex ship after 6 review rounds; evidence in .ai/verifications/ |
+| T7 | Opportunity #1: A/B token benchmark across Claude Code and Codex | claude@feat/ab-bench | claimed | plugins/workbench-bench/, tests/test_bench.py, docs/, README.md, .gitignore | 2026-10-22 09:50 | lease T7 held |
 
 ## Done
 | id | task | owner | finished | evidence |
@@ -16,3 +16,4 @@ Times are UTC. Once a lease time has passed, anyone may take the task.
 | T1 | Pick the repo name and owner, then push to GitHub | human + claude | 2026-10-17 | github.com/yangtingpu102-cloud/agent-workbench |
 | T5 | Opportunity #2: instruction budget linter (`wb.py lint`) | claude:a1 | 2026-10-17 | 13 unit tests pass; branch feat/budget-linter |
 | T4 | Opportunity #6: lease enforcement hooks (`workbench-lease`) | claude | 2026-10-22 | PR #2; live-tested in Codex 0.162 and in Claude Code (Edit and Write denied, unleased file allowed) |
+| T6 | Opportunity #7: evidence-based verification (`verify` skill + CI gate) | claude | 2026-10-22 | PR #3; Codex ship after 8 reviews; gate PASS in CI |

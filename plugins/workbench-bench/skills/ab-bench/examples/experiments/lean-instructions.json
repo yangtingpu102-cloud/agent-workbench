@@ -1,0 +1,19 @@
+{
+  "name": "lean-instructions",
+  "description": "Does a long instruction file cost more without helping? The same bug fix with a verbose versus a lean AGENTS.md (Claude imports it from CLAUDE.md).",
+  "hosts": ["claude", "codex"],
+  "runs": 5,
+  "common": {
+    "claude_args": ["--strict-mcp-config", "--setting-sources", "project,local", "--disable-slash-commands"]
+  },
+  "task": {
+    "fixture": "../fixtures/calc",
+    "prompt": "The tests in tests/test_calc.py fail. Fix calc.py so that they pass. Do not change the tests.",
+    "check": "python -m unittest discover -s tests",
+    "timeout": 600
+  },
+  "arms": [
+    {"name": "verbose", "files_from": {"AGENTS.md": "../fixtures/agents-verbose.md", "CLAUDE.md": "../fixtures/claude-import.md"}},
+    {"name": "lean", "files_from": {"AGENTS.md": "../fixtures/agents-lean.md", "CLAUDE.md": "../fixtures/claude-import.md"}}
+  ]
+}
