@@ -67,6 +67,9 @@ def load_experiment(path: Path) -> dict:
     names = [a.get("name") for a in exp["arms"]]
     if len(set(names)) != len(names) or not all(names):
         raise BenchError("every arm needs a unique name")
+    runs = exp.get("runs", 3)
+    if not is_count(runs) or runs < 1:
+        raise BenchError(f"runs must be a whole number >= 1, not {runs!r}")
     exp["hosts"] = [h for h in exp.get("hosts", list(HOSTS))]
     unknown = [h for h in exp["hosts"] if h not in HOSTS]
     if unknown:
@@ -393,10 +396,18 @@ def run_one(exp: dict, host: str, arm: dict, rnd: int, binary: str, keep: bool,
     return record
 
 
+def run_count(args, exp: dict) -> int:
+    """--runs when given (0 is not "unset"), otherwise the experiment's own count."""
+    runs = exp.get("runs", 3) if args.runs is None else args.runs
+    if runs < 1:
+        raise BenchError(f"--runs must be at least 1, not {runs}")
+    return runs
+
+
 def cmd_plan(args) -> int:
     exp = load_experiment(Path(args.experiment))
     hosts = args.hosts.split(",") if args.hosts else exp["hosts"]
-    runs = args.runs or exp.get("runs", 3)
+    runs = run_count(args, exp)
     print(f"experiment {exp['name']}: {exp.get('description', '')}")
     for host in hosts:
         binary = find_binary(host)
@@ -419,7 +430,7 @@ def cmd_run(args) -> int:
         print("\nnot started: pass --yes to run")
         return 1
     hosts = args.hosts.split(",") if args.hosts else exp["hosts"]
-    runs = args.runs or exp.get("runs", 3)
+    runs = run_count(args, exp)
     binaries = {h: find_binary(h) for h in hosts}
     missing = [h for h, b in binaries.items() if not b]
     if missing:

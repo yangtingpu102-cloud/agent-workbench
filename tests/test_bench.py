@@ -183,6 +183,12 @@ class ExperimentTest(unittest.TestCase):
             with self.assertRaises(bench.BenchError):
                 bench.load_experiment(self.write_exp(bad))
 
+    def test_experiment_run_count_must_be_positive(self):
+        base = {"name": "x", "task": {"prompt": "p"}, "arms": [{"name": "a"}]}
+        for bad in (0, -2, 1.5, "3", True):
+            with self.assertRaises(bench.BenchError, msg=repr(bad)):
+                bench.load_experiment(self.write_exp({**base, "runs": bad}))
+
     def test_price_tables_must_be_complete(self):
         base = {"name": "x", "task": {"prompt": "p"}, "arms": [{"name": "a"}]}
         with self.assertRaises(bench.BenchError):
@@ -352,6 +358,13 @@ class RunTest(unittest.TestCase):
         self.fake_execute = shadow
         self.run_bench("--runs", "1")
         self.assertFalse(any(r["success"] for r in bench.load_runs(self.out)))
+
+    def test_zero_or_negative_runs_never_start(self):
+        for value in ("0", "-1"):
+            code, out = self.run_bench("--runs", value)
+            self.assertEqual(code, 2, value)
+            self.assertIn("--runs must be at least 1", out)
+        self.assertEqual(self.calls, [])
 
     def test_budget_and_prices_must_be_finite(self):
         code, out = self.run_bench("--max-cost", "nan")
