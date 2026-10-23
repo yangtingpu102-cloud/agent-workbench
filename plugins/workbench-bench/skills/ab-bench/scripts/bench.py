@@ -139,10 +139,13 @@ def build_command(host: str, binary: str, exp: dict, arm: dict, workspace: Path,
                   budget: float | None = None) -> list[str]:
     common, task = exp.get("common") or {}, exp["task"]
     if host == "claude":
+        allowed = task.get("claude_allowed_tools", CLAUDE_ALLOWED)
+        tools = task.get("claude_tools")
+        if tools is None:  # --allowedTools only pre-approves; --tools decides what exists, so Bash stays opt-in
+            names = [rule.split("(")[0].strip() for rule in allowed.split(",") if rule.strip()]
+            tools = ",".join(dict.fromkeys(names))
         cmd = [binary, "-p", "--output-format", "json", "--no-session-persistence", "--permission-mode", "acceptEdits",
-               "--allowedTools", task.get("claude_allowed_tools", CLAUDE_ALLOWED)]
-        if task.get("claude_tools") is not None:
-            cmd += ["--tools", task["claude_tools"]]
+               "--allowedTools", allowed, "--tools", tools]
         cmd += list(common.get("claude_args", [])) + list(arm.get("claude_args", []))
         if budget is not None:  # the CLI enforces this per call, so one run cannot overrun the cap
             cmd += ["--max-budget-usd", f"{max(budget, 0.0):.4f}"]

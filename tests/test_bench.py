@@ -207,6 +207,13 @@ class ExperimentTest(unittest.TestCase):
         exp = bench.load_experiment(EXPERIMENTS / "lean-instructions.json")
         cmd = bench.build_command("claude", "claude", exp, exp["arms"][0], Path("w"))
         self.assertNotIn("Bash", cmd[cmd.index("--allowedTools") + 1])
+        self.assertEqual(cmd[cmd.index("--tools") + 1], "Read,Edit,Write,Glob,Grep")  # Bash is not even visible
+        with_shell = {**exp, "task": {**exp["task"], "claude_allowed_tools": "Read,Edit,Bash(python:*)"}}
+        cmd = bench.build_command("claude", "claude", with_shell, exp["arms"][0], Path("w"))
+        self.assertEqual(cmd[cmd.index("--tools") + 1], "Read,Edit,Bash")
+        no_tools = bench.load_experiment(EXPERIMENTS / "headless-overhead.json")
+        cmd = bench.build_command("claude", "claude", no_tools, no_tools["arms"][0], Path("w"))
+        self.assertEqual(cmd[cmd.index("--tools") + 1], "")
         exp["task"]["claude_allowed_tools"] = "Read,Edit,Bash(python:*)"
         path = self.write_exp({k: v for k, v in exp.items() if not k.startswith("_")} | {
             "task": {**exp["task"], "fixture": None}, "arms": [{"name": "a"}]})
