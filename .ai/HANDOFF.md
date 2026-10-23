@@ -1,4 +1,4 @@
-# Handoff — 2026-10-23 08:10 UTC — claude:a1 on feat/ab-bench
+# Handoff — 2026-10-23 07:50 UTC — claude:a1 on feat/ab-bench
 ## Goal
 Ship opportunity #1: workbench-bench, an A/B benchmark of billed cost, tokens, turns and success for Claude Code and Codex.
 ## State
