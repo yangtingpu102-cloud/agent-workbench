@@ -184,6 +184,46 @@ class ExperimentTest(unittest.TestCase):
             with self.assertRaises(bench.BenchError):
                 bench.load_experiment(self.write_exp(bad))
 
+    def test_every_kind_of_bad_input_is_rejected_before_running(self):
+        def exp(**changes):
+            data = {"name": "x", "task": {"prompt": "p"}, "arms": [{"name": "a"}, {"name": "b"}]}
+            for dotted, value in changes.items():
+                target, *path, last = ["root", *dotted.split("__")]
+                node = data
+                for part in path:
+                    node = node[int(part)] if part.isdigit() else node[part]
+                node[int(last) if last.isdigit() else last] = value
+            return data
+
+        cases = {
+            "unknown key 'claude_arg'": exp(arms=[{"name": "a", "claude_arg": ["-x"]}]),
+            "unknown key 'promt'": exp(task={"promt": "p"}),
+            "unknown key 'model'": exp(model="m"),
+            "name must be": exp(name="../../escape"),
+            "arms[0].name must be": exp(arms=[{"name": "bad/name"}]),
+            "task.prompt must be": exp(task={"prompt": "  "}),
+            "task.timeout must be": exp(task={"prompt": "p", "timeout": 0}),
+            "task.codex_sandbox must be": exp(task={"prompt": "p", "codex_sandbox": "danger-full-access"}),
+            "task.check must be": exp(task={"prompt": "p", "check": 5}),
+            "task.expect must be": exp(task={"prompt": "p", "expect": ""}),
+            "common.env must map": exp(common={"env": {"A": 1}}),
+            "arms[0].claude_args must be": exp(arms=[{"name": "a", "claude_args": "--x"}]),
+            "arms[0].env must map": exp(arms=[{"name": "a", "env": {"K": None}}]),
+            "arms must be a non-empty list": exp(arms=[]),
+            "unknown key 'claude'": exp(prices={"claude": {"input": 1}}),
+            "experiment must be an object": [1, 2],
+        }
+        for expected, data in cases.items():
+            with self.assertRaises(bench.BenchError, msg=expected) as ctx:
+                bench.load_experiment(self.write_exp(data))
+            self.assertIn(expected, str(ctx.exception), expected)
+
+    def test_all_problems_are_reported_at_once(self):
+        bad = {"name": "../x", "task": {"prompt": "", "timeout": -1}, "arms": [{"name": "a", "typo": 1}]}
+        with self.assertRaises(bench.BenchError) as ctx:
+            bench.load_experiment(self.write_exp(bad))
+        self.assertIn("4 problem(s)", str(ctx.exception))
+
     def test_experiment_run_count_must_be_positive(self):
         base = {"name": "x", "task": {"prompt": "p"}, "arms": [{"name": "a"}]}
         for bad in (0, -2, 1.5, "3", True):

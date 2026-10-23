@@ -23,6 +23,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import statistics
 import subprocess
@@ -55,37 +56,130 @@ def now() -> str:
 
 # ---------- experiment ----------
 
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+TOP_KEYS = {"name", "description", "hosts", "runs", "common", "task", "arms", "prices"}
+TASK_KEYS = {"prompt", "fixture", "check", "expect", "timeout", "claude_tools", "claude_allowed_tools",
+             "codex_sandbox"}
+ARM_KEYS = {"name", "claude_args", "codex_args", "env", "files", "files_from"}
+COMMON_KEYS = {"claude_args", "codex_args", "env"}
+SANDBOXES = ("read-only", "workspace-write")  # never danger-full-access: the agent must stay in its workspace
+
+
+def is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def validate(exp, base: Path) -> list[str]:
+    """Every problem in an experiment, found before anything runs. Unknown keys are errors: a typo such as
+    "claude_arg" would otherwise make an arm silently identical to the baseline."""
+    errors: list[str] = []
+
+    def keys(obj, allowed: set, label: str) -> bool:
+        if not isinstance(obj, dict):
+            errors.append(f"{label} must be an object")
+            return False
+        errors.extend(f"{label}: unknown key '{k}' (allowed: {', '.join(sorted(allowed))})"
+                      for k in obj if k not in allowed)
+        return True
+
+    def strings(value, label: str) -> None:
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            errors.append(f"{label} must be a list of strings")
+
+    def mapping(value, label: str) -> None:
+        if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+            errors.append(f"{label} must map strings to strings")
+
+    def optional_str(obj: dict, key: str, label: str, non_empty: bool = False) -> None:
+        if key in obj and obj[key] is not None and (not isinstance(obj[key], str) or (non_empty and not obj[key])):
+            errors.append(f"{label}.{key} must be {'a non-empty ' if non_empty else 'a '}string or null")
+
+    if not keys(exp, TOP_KEYS, "experiment"):
+        return errors
+    if not isinstance(exp.get("name"), str) or not NAME_RE.match(exp["name"]):
+        errors.append("name must be 1-64 letters, digits, '.', '_' or '-' (it names the results folder)")
+    if "description" in exp and not isinstance(exp["description"], str):
+        errors.append("description must be a string")
+    if not is_count(exp.get("runs", 3)) or exp.get("runs", 3) < 1:
+        errors.append(f"runs must be a whole number >= 1, not {exp.get('runs')!r}")
+    try:
+        check_hosts(exp.get("hosts", list(HOSTS)), "hosts")
+    except BenchError as e:
+        errors.append(str(e))
+
+    common = exp.get("common", {})
+    if keys(common, COMMON_KEYS, "common"):
+        for key in ("claude_args", "codex_args"):
+            if key in common:
+                strings(common[key], f"common.{key}")
+        if "env" in common:
+            mapping(common["env"], "common.env")
+
+    task = exp.get("task")
+    if keys(task, TASK_KEYS, "task"):
+        if not isinstance(task.get("prompt"), str) or not task["prompt"].strip():
+            errors.append("task.prompt must be a non-empty string")
+        for key, non_empty in (("check", True), ("expect", True), ("claude_tools", False),
+                               ("claude_allowed_tools", True), ("fixture", True)):
+            optional_str(task, key, "task", non_empty)
+        if isinstance(task.get("fixture"), str) and task["fixture"] and not (base / task["fixture"]).is_dir():
+            errors.append(f"task.fixture '{task['fixture']}' is not a directory next to the experiment")
+        timeout = task.get("timeout", 600)
+        if not is_number(timeout) or timeout <= 0:
+            errors.append(f"task.timeout must be a number of seconds > 0, not {timeout!r}")
+        if task.get("codex_sandbox", "workspace-write") not in SANDBOXES:
+            errors.append(f"task.codex_sandbox must be one of {', '.join(SANDBOXES)}")
+
+    arms = exp.get("arms")
+    if not isinstance(arms, list) or not arms:
+        errors.append("arms must be a non-empty list")
+        arms = []
+    names = []
+    for i, arm in enumerate(arms):
+        label = f"arms[{i}]"
+        if not keys(arm, ARM_KEYS, label):
+            continue
+        name = arm.get("name")
+        if not isinstance(name, str) or not NAME_RE.match(name):
+            errors.append(f"{label}.name must be 1-64 letters, digits, '.', '_' or '-'")
+        names.append(name)
+        for key in ("claude_args", "codex_args"):
+            if key in arm:
+                strings(arm[key], f"{label}.{key}")
+        for key in ("env", "files", "files_from"):
+            if key in arm:
+                mapping(arm[key], f"{label}.{key}")
+        for dest in [*(arm.get("files") or {}), *(arm.get("files_from") or {})] if \
+                isinstance(arm.get("files", {}), dict) and isinstance(arm.get("files_from", {}), dict) else []:
+            if not isinstance(dest, str) or not safe_relative(dest):
+                errors.append(f"{label}: '{dest}' must be a relative path inside the workspace")
+        if isinstance(arm.get("files_from"), dict):
+            errors.extend(f"{label}: file '{src}' not found" for src in arm["files_from"].values()
+                          if isinstance(src, str) and not (base / src).is_file())
+    if len(set(map(str, names))) != len(names):
+        errors.append("arm names must be unique")
+
+    prices = exp.get("prices", {})
+    if keys(prices, {"codex"}, "prices") and "codex" in prices:  # Claude reports its own cost
+        table = prices["codex"]
+        if keys(table, set(PRICE_KEYS), "prices.codex"):
+            missing = [k for k in PRICE_KEYS if not is_number(table.get(k)) or table.get(k) < 0]
+            if missing:
+                errors.append(f"prices.codex needs numbers >= 0 (USD per million tokens) for {', '.join(missing)}")
+    return errors
+
+
 def load_experiment(path: Path) -> dict:
     try:
         exp = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         raise BenchError(f"cannot read {path}: {e}")
     base = path.resolve().parent
+    errors = validate(exp, base)
+    if errors:
+        raise BenchError(f"{path.name} has {len(errors)} problem(s):\n  - " + "\n  - ".join(errors))
     exp["_base"] = base
-    if not exp.get("name") or not exp.get("arms") or not exp.get("task", {}).get("prompt"):
-        raise BenchError("an experiment needs name, task.prompt and at least one arm")
-    names = [a.get("name") for a in exp["arms"]]
-    if len(set(names)) != len(names) or not all(names):
-        raise BenchError("every arm needs a unique name")
-    runs = exp.get("runs", 3)
-    if not is_count(runs) or runs < 1:
-        raise BenchError(f"runs must be a whole number >= 1, not {runs!r}")
     exp["hosts"] = check_hosts(exp.get("hosts", list(HOSTS)), "hosts")
-    fixture = exp["task"].get("fixture")
-    if fixture and not (base / fixture).is_dir():
-        raise BenchError(f"fixture {fixture} not found next to {path.name}")
-    for arm in exp["arms"]:
-        for rel in (arm.get("files_from") or {}).values():
-            if not (base / rel).is_file():
-                raise BenchError(f"arm {arm['name']}: file {rel} not found")
-        for dest in list((arm.get("files_from") or {})) + list((arm.get("files") or {})):
-            if not safe_relative(dest):
-                raise BenchError(f"arm {arm['name']}: '{dest}' must be a relative path inside the workspace")
-    for host, table in (exp.get("prices") or {}).items():
-        values = [table.get(k) if isinstance(table, dict) else None for k in PRICE_KEYS]
-        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0
-                   for v in values):
-            raise BenchError(f"prices.{host} needs numbers >= 0 for {', '.join(PRICE_KEYS)} (USD per million tokens)")
     return exp
 
 
