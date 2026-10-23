@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILLS = ROOT / "plugins" / "workbench-core" / "skills"
@@ -383,6 +384,17 @@ class EvidenceCompleteTest(unittest.TestCase):
         self.assertFalse(ask_peer.evidence_complete(True, "x", 100, "abc", "def"))  # edited during review
         self.assertFalse(ask_peer.evidence_complete(False, "x", 100, "abc", "abc"))
         self.assertIsNone(ask_peer.evidence_complete(None, "x", 100, "abc", "abc"))  # questions are not reviews
+
+
+class PeerCommandTest(unittest.TestCase):
+    def test_claude_reviewer_runs_isolated_and_read_only(self):
+        cmd = ask_peer.peer_command("claude", "claude", None, "out.md")
+        for flag in ("--strict-mcp-config", "--disable-slash-commands", "dontAsk"):
+            self.assertIn(flag, cmd)
+        self.assertEqual(cmd[cmd.index("--setting-sources") + 1], "project,local")
+        self.assertEqual(cmd[cmd.index("--tools") + 1], "Read,Grep,Glob")
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}):
+            self.assertNotIn("CLAUDECODE", ask_peer.peer_env())
 
 
 class ParseVerdictTest(unittest.TestCase):

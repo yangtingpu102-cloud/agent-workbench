@@ -16,6 +16,7 @@ Skills and plugins that make **Claude Code** and **OpenAI Codex** cheaper and sm
 | `workbench-core` | `handoff` | Writes or resumes a 40-line `.ai/HANDOFF.md`, so the next agent continues without re-exploring the repo |
 | | `cross-review` | Asks the other agent (Claude ↔ Codex) for a read-only review of your diff and saves the verdict as a JSON record |
 | | `verify` | Runs the checks in `.ai/verify.json`, records exit codes and output hashes for the exact content, and gates merges on that evidence plus a `ship` review by the other agent |
+| `workbench-bench` | `ab-bench` | A/B experiments on Claude Code and Codex: billed cost, tokens, turns and success per configuration, with 95% intervals |
 | `workbench-lease` | `lease` + PreToolUse hooks | File leases per branch, shared by all worktrees; blocks Claude Code and Codex edits to files another branch has leased |
 
 Always-loaded cost of `workbench-core` is about 190 tokens per session (`python scripts/wb.py budget`).
