@@ -16,7 +16,7 @@ Runs the same task headless in fresh workspaces under two or more configurations
 2. Show the plan: `python <skill-dir>/scripts/bench.py plan <experiment.json>`. Tell the user how many agent runs it means and that each one spends quota or money. Get their go-ahead and a budget before running.
 3. Run it: `python <skill-dir>/scripts/bench.py run <experiment.json> --yes --max-cost <USD>`. Start with `--runs 3`. An interrupted run resumes when you run the same command with the same `--out`.
 4. Read `report.md` in the results directory and report back:
-   - Call a difference real only when its 95% interval excludes zero. With fewer than 3 runs per arm, call the result anecdotal.
+   - Call a difference real only when its 95% interval excludes zero. The report gives a verdict only after 5 rounds shared by both arms; below that, call the result anecdotal.
    - Compare cost per success, not only cost per run.
 
 ## Rules
@@ -25,5 +25,5 @@ Runs the same task headless in fresh workspaces under two or more configurations
 - Claude cost comes from the CLI. Codex cost is estimated only when the experiment has `prices` (USD per million tokens). Otherwise compare tokens.
 - `--max-cost` is enforced per call for Claude (each call gets the remaining budget as `--max-budget-usd`). Codex has no per-call limit, so a capped run that includes Codex needs `--allow-overrun`: tell the user that one Codex run can exceed the cap before it is checked.
 - Agents get edit rights inside the temporary workspace only: Claude via `acceptEdits` plus an explicit tool list without a shell, Codex via the `workspace-write` sandbox.
-- Treat an experiment file from someone else like code. Its `check` runs on this machine outside any sandbox, and `plan` prints it: read it before you run. Arm flags outside a safe list (extra directories, settings, MCP servers, permission or sandbox overrides) are refused unless you pass `--allow-any-args` after checking them. Fixtures and `files_from` sources must stay under the folder that holds the experiment's folder; a fixture's `.git` is never copied.
+- Treat an experiment file from someone else like code. Its `check` runs on this machine outside any sandbox, and `plan` prints it: read it before you run. Arm flags outside a safe list (extra directories, settings, MCP servers, permission or sandbox overrides) are refused unless you pass `--allow-any-args` after checking them. Fixtures and `files_from` sources must come from the git repository that holds the experiment (or from the experiment's own folder outside a repository); fixtures may not contain links, their `.git` is never copied, and arm files may not be written into `.git`.
 - For one-word answers, use `"expect_match": "exact"`, so that "not ok" does not count as "ok".

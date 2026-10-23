@@ -41,6 +41,7 @@ HOSTS = ("claude", "codex")
 # Claude confines Edit and Write to its working directory; Bash would not be confined, so it is opt-in.
 CLAUDE_ALLOWED = "Read,Edit,Write,Glob,Grep"
 BOOTSTRAP_ITERS = 2000
+MIN_PAIRS = 5  # rounds both arms must share before the report calls a difference
 FIXTURE_IGNORE = (".git", "__pycache__", "*.pyc")  # a copied .git could bring hooks or config
 PRICE_KEYS = ("input", "cached_input", "output")
 EXIT_PARTIAL = 3  # `run` stopped at --max-cost before finishing
@@ -129,7 +130,7 @@ def validate(exp, base: Path, allow_any_args: bool = False) -> list[str]:
                     errors.append(f"{label}.{key}: {', '.join(bad)} not allowed; they could widen what the agent "
                                   "may touch (pass --allow-any-args after checking them)")
 
-    root = base.parent.resolve()  # sources must stay under the folder that holds the experiment's folder
+    root = source_root(base)
 
     def source(rel, label: str, want_dir: bool) -> None:
         if not isinstance(rel, str) or not rel or Path(rel).is_absolute() or rel.startswith(("/", "\\")):
@@ -141,9 +142,9 @@ def validate(exp, base: Path, allow_any_args: bool = False) -> list[str]:
         elif not (path.is_dir() if want_dir else path.is_file()):
             errors.append(f"{label} '{rel}' is not a {'directory' if want_dir else 'file'}")
         elif want_dir:
-            escaping = [p for p in path.rglob("*") if p.is_symlink() and not p.resolve().is_relative_to(root)]
-            errors.extend(f"{label} contains a link to outside {root}: {p.relative_to(path).as_posix()}"
-                          for p in escaping)
+            links = [p for p in path.rglob("*") if p.is_symlink()]  # copytree follows links; the fingerprint would not
+            errors.extend(f"{label} contains a link, which fixtures may not: {p.relative_to(path).as_posix()}"
+                          for p in links)
 
     if not keys(exp, TOP_KEYS, "experiment"):
         return errors
@@ -246,10 +247,20 @@ def check_hosts(hosts, label: str) -> list[str]:
     return hosts
 
 
+def source_root(base: Path) -> Path:
+    """Fixtures and arm files may come only from the git repository that holds the experiment, or from the
+    experiment's own folder when it is not in a repository."""
+    try:
+        r = subprocess.run(["git", "-C", str(base), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    except FileNotFoundError:
+        return base.resolve()
+    return Path(r.stdout.strip()).resolve() if r.returncode == 0 and r.stdout.strip() else base.resolve()
+
+
 def safe_relative(rel: str) -> bool:
     parts = Path(rel.replace("\\", "/")).parts
     return bool(parts) and not Path(rel).is_absolute() and not rel.startswith(("/", "\\")) \
-        and ":" not in parts[0] and ".." not in parts
+        and ":" not in parts[0] and ".." not in parts and parts[0].lower() != ".git"  # .git/config could run code
 
 
 def fingerprint(exp: dict, seed: int) -> str:
@@ -517,8 +528,9 @@ def codex_model(cmd: list[str]) -> str:
     """Codex's JSON events do not name the model, so record the one pinned on the command line, if any."""
     model = "unpinned"
     for i, arg in enumerate(cmd[:-1]):
-        if arg in ("-m", "--model"):
-            model = cmd[i + 1]  # the last occurrence wins, as for the CLI itself
+        name, eq, value = arg.partition("=")
+        if name in ("-m", "--model"):
+            model = value if eq else cmd[i + 1]  # the last occurrence wins, as for the CLI itself
     return model
 
 
@@ -608,6 +620,11 @@ def cmd_run(args) -> int:
     if args.max_cost is not None and "codex" in hosts and not (exp.get("prices") or {}).get("codex"):
         raise BenchError("--max-cost needs a measurable cost, but Codex reports tokens only. Add "
                          '"prices": {"codex": {"input": .., "cached_input": .., "output": ..}} or drop --max-cost')
+    codex_prices = (exp.get("prices") or {}).get("codex") or {}
+    if args.max_cost is not None and "codex" in hosts and not (codex_prices.get("input", 0) > 0
+                                                               and codex_prices.get("output", 0) > 0):
+        raise BenchError("--max-cost with Codex needs input and output prices above zero; zero prices would "
+                         "record no spend and never stop the run")
     fp = fingerprint(exp, args.seed)
     out_dir = Path(args.out or Path(".ai") / "bench" / f"{exp['name']}-{dt.datetime.now():%Y%m%d-%H%M%S}")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -695,7 +712,7 @@ def bootstrap_paired(base: dict[int, float], other: dict[int, float], rng: rando
     """95% interval of the mean per-round difference (other - base). Arms run in the same rounds, so pairing by
     round removes drift that hits both arms alike."""
     rounds = sorted(set(base) & set(other))
-    if len(rounds) < 3:
+    if len(rounds) < MIN_PAIRS:  # with fewer pairs a bootstrap interval can look decisive by chance
         return None
     diffs = [other[r] - base[r] for r in rounds]
     means = sorted(statistics.fmean(rng.choices(diffs, k=len(diffs))) for _ in range(BOOTSTRAP_ITERS))
@@ -756,9 +773,9 @@ def build_report(runs: list[dict], exp: dict, seed: int = 0) -> str:
     runs = [r for r in runs if r.get("status") != "started"]
     lines = [f"# Benchmark: {exp['name']}", "", exp.get("description", ""), "",
              f"{len(runs)} completed runs. Cost is reported by Claude Code and estimated for Codex when prices are given. "
-             "Intervals are 95%. Success uses a Wilson interval at any run count (wide when runs are few); means and "
-             "differences use a bootstrap and need at least 3 runs per arm. Unknown values show n/a and are never "
-             "counted as zero.", ""]
+             "Intervals are 95%. Success uses a Wilson interval at any run count (wide when runs are few); means use "
+             f"a bootstrap from 3 runs per arm, and a difference gets a verdict only after {MIN_PAIRS} rounds shared "
+             "by both arms. Unknown values show n/a and are never counted as zero.", ""]
     if lost:
         lines += [f"**Note:** {len(lost)} call(s) were interrupted before recording a result. They may have cost money "
                   "and are not in the tables.", ""]

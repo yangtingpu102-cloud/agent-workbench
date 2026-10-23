@@ -119,6 +119,7 @@ class CodexModelTest(unittest.TestCase):
         self.assertEqual(bench.codex_model(["codex", "exec", "--model", "gpt-y", "-"]), "gpt-y")
         self.assertEqual(bench.codex_model(["codex", "exec", "-"]), "unpinned")
         self.assertEqual(bench.codex_model(["codex", "exec", "-m", "common", "-m", "arm", "-"]), "arm")
+        self.assertEqual(bench.codex_model(["codex", "exec", "--model=gpt-z", "-"]), "gpt-z")
 
     def test_report_warns_when_codex_model_is_not_pinned(self):
         exp = {"name": "x", "arms": [{"name": "a"}]}
@@ -136,8 +137,9 @@ class StatsTest(unittest.TestCase):
 
     def test_bootstrap_needs_three_values_and_detects_a_clear_difference(self):
         self.assertIsNone(bench.bootstrap_ci([1.0, 2.0], random.Random(0)))
-        base = dict(enumerate([10.0, 11.0, 12.0, 10.5]))
-        ci = bench.bootstrap_paired(base, dict(enumerate([5.0, 5.5, 6.0, 5.2])), random.Random(0))
+        base = dict(enumerate([10.0, 11.0, 12.0, 10.5, 11.5]))
+        ci = bench.bootstrap_paired(base, dict(enumerate([5.0, 5.5, 6.0, 5.2, 5.8])), random.Random(0))
+        self.assertIsNone(bench.bootstrap_paired(dict(enumerate([1.0] * 4)), dict(enumerate([2.0] * 4)), random.Random(0)))
         self.assertLess(ci[1], 0)
         self.assertEqual(bench.verdict(ci), "lower")
         self.assertEqual(bench.verdict((-1.0, 2.0)), "no clear difference")
@@ -145,8 +147,8 @@ class StatsTest(unittest.TestCase):
 
     def test_paired_difference_uses_only_rounds_both_arms_ran(self):
         # Round drift hits both arms alike; pairing by round cancels it.
-        base = {0: 100.0, 1: 200.0, 2: 300.0, 3: 400.0}
-        other = {0: 90.0, 1: 190.0, 2: 290.0, 3: 390.0, 4: 1.0}
+        base = {0: 100.0, 1: 200.0, 2: 300.0, 3: 400.0, 4: 500.0}
+        other = {0: 90.0, 1: 190.0, 2: 290.0, 3: 390.0, 4: 490.0, 5: 1.0}
         self.assertEqual(bench.bootstrap_paired(base, other, random.Random(0)), (-10.0, -10.0))
         self.assertIsNone(bench.bootstrap_paired({0: 1.0, 1: 2.0}, {0: 1.0, 1: 2.0}, random.Random(0)))
 
@@ -294,6 +296,7 @@ class UntrustedExperimentTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self.tmp.name)
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)  # sources may come from this repo only
         self.exp_dir = self.root / "experiments"
         self.exp_dir.mkdir()
 
@@ -327,6 +330,23 @@ class UntrustedExperimentTest(unittest.TestCase):
         with self.assertRaises(bench.BenchError):
             self.load({"task": {"prompt": "p", "fixture": "../.."}, "arms": [{"name": "a"}]})
 
+    def test_arm_files_may_not_touch_git(self):
+        for dest in (".git/config", ".GIT/hooks/pre-commit", ".git"):
+            with self.assertRaises(bench.BenchError, msg=dest):
+                self.load({"arms": [{"name": "a", "files": {dest: "x"}}]})
+
+    def test_outside_a_repository_sources_stay_in_the_experiment_folder(self):
+        loose = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(loose, ignore_errors=True))
+        (loose / "fx").mkdir()
+        (loose / "experiments").mkdir()
+        path = loose / "experiments" / "exp.json"
+        path.write_text(json.dumps({"name": "x", "task": {"prompt": "p", "fixture": "../fx"},
+                                    "arms": [{"name": "a"}]}), encoding="utf-8")
+        with self.assertRaises(bench.BenchError) as ctx:
+            bench.load_experiment(path)
+        self.assertIn("resolves outside", str(ctx.exception))
+
     def test_fixture_links_to_outside_are_rejected(self):
         fixture = self.root / "fx"
         fixture.mkdir()
@@ -336,7 +356,7 @@ class UntrustedExperimentTest(unittest.TestCase):
             self.skipTest("this machine cannot create symlinks")
         with self.assertRaises(bench.BenchError) as ctx:
             self.load({"task": {"prompt": "p", "fixture": "../fx"}, "arms": [{"name": "a"}]})
-        self.assertIn("link to outside", str(ctx.exception))
+        self.assertIn("contains a link", str(ctx.exception))
 
     def test_a_fixture_git_folder_is_not_copied(self):
         fixture = self.root / "fx"
@@ -401,7 +421,7 @@ class RunTest(unittest.TestCase):
         return 0, json.dumps(data), ""
 
     def run_bench(self, *extra: str) -> tuple[int, str]:
-        argv = ["run", str(EXPERIMENTS / "lean-instructions.json"), "--yes", "--hosts", "claude", "--runs", "3",
+        argv = ["run", str(EXPERIMENTS / "lean-instructions.json"), "--yes", "--hosts", "claude", "--runs", "5",
                 "--out", str(self.out), *extra]
         buf = io.StringIO()
         with mock.patch.object(bench, "execute", self.fake_execute), \
@@ -415,7 +435,7 @@ class RunTest(unittest.TestCase):
         code, out = self.run_bench()
         self.assertEqual(code, 0, out)
         runs = bench.load_runs(self.out)
-        self.assertEqual(len(runs), 6)
+        self.assertEqual(len(runs), 10)
         by_arm = {arm: [r for r in runs if r["arm"] == arm] for arm in ("verbose", "lean")}
         self.assertTrue(all(r["success"] for r in by_arm["lean"]))
         self.assertFalse(any(r["success"] for r in by_arm["verbose"]))
@@ -425,8 +445,8 @@ class RunTest(unittest.TestCase):
         self.assertIn("Fix calc.py", call["stdin"])
         self.assertIn("--strict-mcp-config", call["cmd"])
         report = (self.out / "report.md").read_text(encoding="utf-8")
-        self.assertIn("| lean | 3 | 3/3", report)
-        self.assertIn("| verbose | 3 | 0/3", report)
+        self.assertIn("| lean | 5 | 5/5", report)
+        self.assertIn("| verbose | 5 | 0/5", report)
         self.assertIn("| lean | [$-0.0300, $-0.0300] | lower |", report)
 
     def test_resume_skips_finished_runs_and_max_cost_stops(self):
@@ -552,6 +572,21 @@ class RunTest(unittest.TestCase):
         report = (self.out / "report.md").read_text(encoding="utf-8")
         self.assertIn("1 call(s) were interrupted", report)
 
+    def test_zero_codex_prices_cannot_enforce_a_cap(self):
+        exp_dir = Path(self.tmp.name) / "zero"
+        exp_dir.mkdir()
+        path = exp_dir / "zero.json"
+        path.write_text(json.dumps({"name": "zero", "hosts": ["codex"], "task": {"prompt": "p"},
+                                    "arms": [{"name": "a"}],
+                                    "prices": {"codex": {"input": 0, "cached_input": 0, "output": 0}}}),
+                        encoding="utf-8")
+        buf = io.StringIO()
+        with mock.patch.object(bench, "execute", self.fake_execute),                 mock.patch.object(bench, "find_binary", lambda host: "codex-bin"),                 contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            code = bench.main(["run", str(path), "--yes", "--max-cost", "1", "--allow-overrun", "--out", str(self.out)])
+        self.assertEqual(code, 2)
+        self.assertIn("above zero", buf.getvalue())
+        self.assertEqual(self.calls, [])
+
     def test_max_cost_needs_codex_prices(self):
         code, out = self.run_bench("--hosts", "codex", "--max-cost", "1", "--allow-overrun")
         self.assertEqual(code, 2)
@@ -561,6 +596,7 @@ class RunTest(unittest.TestCase):
         import shutil
         copy = Path(self.tmp.name) / "examples"
         shutil.copytree(SKILL / "examples", copy)
+        subprocess.run(["git", "init", "-q", str(copy)], check=True)
         exp_path = copy / "experiments" / "lean-instructions.json"
         argv = ["run", str(exp_path), "--yes", "--hosts", "claude", "--runs", "1", "--out", str(self.out)]
         with mock.patch.object(bench, "execute", self.fake_execute),                 mock.patch.object(bench, "find_binary", lambda host: "claude-bin"),                 contextlib.redirect_stdout(io.StringIO()):
