@@ -9,6 +9,7 @@
   "task": {
     "prompt": "Reply with the single word ok.",
     "expect": "ok",
+    "expect_match": "exact",
     "check": null,
     "timeout": 300,
     "claude_tools": ""

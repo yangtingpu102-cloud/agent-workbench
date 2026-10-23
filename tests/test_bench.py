@@ -283,6 +283,103 @@ class ExperimentTest(unittest.TestCase):
             shutil.rmtree(workspace, ignore_errors=True)
 
 
+def report_run(arm: str, rnd: int, model: str = "m", cost: float = 0.1) -> dict:
+    return {"host": "claude", "arm": arm, "round": rnd, "success": True, "cost_usd": cost, "total_input": 100,
+            "cache_read": 10, "output": 5, "turns": 1, "seconds": 1.0, "model": model}
+
+
+class UntrustedExperimentTest(unittest.TestCase):
+    """An experiment file may come from someone else: it must not widen access or read files it should not."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.root = Path(self.tmp.name)
+        self.exp_dir = self.root / "experiments"
+        self.exp_dir.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def load(self, data: dict, **kw) -> dict:
+        path = self.exp_dir / "exp.json"
+        path.write_text(json.dumps({"name": "x", "task": {"prompt": "p"}, **data}), encoding="utf-8")
+        return bench.load_experiment(path, **kw)
+
+    def test_arm_flags_outside_the_safe_list_are_rejected(self):
+        for arms in ([{"name": "a", "codex_args": ["--add-dir", "C:/elsewhere"]}],
+                     [{"name": "a", "codex_args": ["-c", "sandbox_mode=danger-full-access"]}],
+                     [{"name": "a", "claude_args": ["--settings", "hooks.json"]}],
+                     [{"name": "a", "claude_args": ["--permission-mode", "bypassPermissions"]}],
+                     [{"name": "a", "claude_args": ["--model", "m", "stray-positional"]}]):
+            with self.assertRaises(bench.BenchError) as ctx:
+                self.load({"arms": arms})
+            self.assertIn("not allowed", str(ctx.exception))
+        ok = self.load({"arms": [{"name": "a", "claude_args": ["--model", "m", "--strict-mcp-config"]},
+                                 {"name": "b", "codex_args": ["-m", "x", "--ignore-user-config"]}]})
+        self.assertEqual(len(ok["arms"]), 2)
+        self.load({"arms": [{"name": "a", "codex_args": ["--add-dir", "C:/elsewhere"]}]}, allow_any_args=True)
+
+    def test_sources_must_stay_under_the_experiment_root(self):
+        outside = self.root.parent / f"outside-{os.getpid()}.txt"
+        for src in (f"../../{outside.name}", str(outside), "/etc/hosts"):
+            with self.assertRaises(bench.BenchError, msg=src):
+                self.load({"arms": [{"name": "a", "files_from": {"AGENTS.md": src}}]})
+        with self.assertRaises(bench.BenchError):
+            self.load({"task": {"prompt": "p", "fixture": "../.."}, "arms": [{"name": "a"}]})
+
+    def test_fixture_links_to_outside_are_rejected(self):
+        fixture = self.root / "fx"
+        fixture.mkdir()
+        try:
+            os.symlink(self.root.parent, fixture / "escape", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("this machine cannot create symlinks")
+        with self.assertRaises(bench.BenchError) as ctx:
+            self.load({"task": {"prompt": "p", "fixture": "../fx"}, "arms": [{"name": "a"}]})
+        self.assertIn("link to outside", str(ctx.exception))
+
+    def test_a_fixture_git_folder_is_not_copied(self):
+        fixture = self.root / "fx"
+        (fixture / ".git").mkdir(parents=True)
+        (fixture / ".git" / "fixture-marker").write_text("x", encoding="utf-8")
+        (fixture / "a.txt").write_text("a", encoding="utf-8")
+        exp = self.load({"task": {"prompt": "p", "fixture": "../fx"}, "arms": [{"name": "a"}]})
+        workspace = bench.prepare_workspace(exp, exp["arms"][0])
+        try:
+            self.assertTrue((workspace / "a.txt").is_file())
+            self.assertFalse((workspace / ".git" / "fixture-marker").exists())
+        finally:
+            import shutil
+            shutil.rmtree(workspace, ignore_errors=True)
+
+    def test_plan_shows_the_check_command(self):
+        buf = io.StringIO()
+        with mock.patch.object(bench, "find_binary", lambda host: "bin"), contextlib.redirect_stdout(buf):
+            bench.main(["plan", str(EXPERIMENTS / "lean-instructions.json"), "--hosts", "claude"])
+        self.assertIn("outside any sandbox: python -c", buf.getvalue())
+
+
+class ReportHonestyTest(unittest.TestCase):
+    exp = {"name": "x", "task": {"prompt": "p", "check": "c"}, "arms": [{"name": "a"}, {"name": "b"}]}
+
+    def test_interrupted_calls_make_cost_per_success_unknown_and_are_not_counted_as_runs(self):
+        marker = {"id": "m", "status": "started", "host": "claude", "arm": "a", "round": 1}
+        report = bench.build_report([marker, report_run("a", 0)], self.exp)
+        self.assertIn("1 completed runs", report)
+        self.assertIn("n/a (1 interrupted)", report)
+
+    def test_no_verdict_when_models_differ(self):
+        runs = [report_run("a", r, "m1", 1.0) for r in range(3)] + [report_run("b", r, "m2", 0.1) for r in range(3)]
+        report = bench.build_report(runs, self.exp)
+        self.assertIn("not comparable (models differ or are unpinned)", report)
+        self.assertNotIn("| lower |", report)
+
+    def test_exact_expect(self):
+        self.assertFalse(bench.answer_matches("ok", "not ok", "exact"))
+        self.assertTrue(bench.answer_matches("ok", "  OK. ", "exact"))
+        self.assertTrue(bench.answer_matches("ok", "not ok", "contains"))
+
+
 class RunTest(unittest.TestCase):
     """End to end with a fake agent: the lean arm fixes the bug, the verbose arm does not."""
 
@@ -422,8 +519,13 @@ class RunTest(unittest.TestCase):
         data = json.loads(CLAUDE_OUTPUT)
         data["result"] = "ok" + "x" * 5000
         self.fake_execute = lambda *a: (0, json.dumps(data), "")
-        argv = ["run", str(EXPERIMENTS / "headless-overhead.json"), "--yes", "--hosts", "claude", "--runs", "1",
-                "--out", str(self.out)]
+        exp_dir = Path(self.tmp.name) / "exp"
+        exp_dir.mkdir()
+        exp_path = exp_dir / "contains.json"
+        exp_path.write_text(json.dumps({"name": "contains", "hosts": ["claude"], "task": {
+            "prompt": "p", "expect": "ok", "expect_match": "contains", "claude_tools": ""},
+            "arms": [{"name": "a"}, {"name": "b"}]}), encoding="utf-8")
+        argv = ["run", str(exp_path), "--yes", "--runs", "1", "--out", str(self.out)]
         with mock.patch.object(bench, "execute", lambda *a: self.fake_execute(*a)),                 mock.patch.object(bench, "find_binary", lambda host: "claude-bin"),                 contextlib.redirect_stdout(io.StringIO()):
             bench.main(argv)
         runs = bench.load_runs(self.out)

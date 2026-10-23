@@ -41,7 +41,7 @@ HOSTS = ("claude", "codex")
 # Claude confines Edit and Write to its working directory; Bash would not be confined, so it is opt-in.
 CLAUDE_ALLOWED = "Read,Edit,Write,Glob,Grep"
 BOOTSTRAP_ITERS = 2000
-FIXTURE_IGNORE = ("__pycache__", "*.pyc")
+FIXTURE_IGNORE = (".git", "__pycache__", "*.pyc")  # a copied .git could bring hooks or config
 PRICE_KEYS = ("input", "cached_input", "output")
 EXIT_PARTIAL = 3  # `run` stopped at --max-cost before finishing
 
@@ -58,18 +58,41 @@ def now() -> str:
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 TOP_KEYS = {"name", "description", "hosts", "runs", "common", "task", "arms", "prices"}
-TASK_KEYS = {"prompt", "fixture", "check", "expect", "timeout", "claude_tools", "claude_allowed_tools",
-             "codex_sandbox"}
+TASK_KEYS = {"prompt", "fixture", "check", "expect", "expect_match", "timeout", "claude_tools",
+             "claude_allowed_tools", "codex_sandbox"}
 ARM_KEYS = {"name", "claude_args", "codex_args", "env", "files", "files_from"}
 COMMON_KEYS = {"claude_args", "codex_args", "env"}
 SANDBOXES = ("read-only", "workspace-write")  # never danger-full-access: the agent must stay in its workspace
+EXPECT_MODES = ("contains", "exact")
+# Arm flags that cannot widen what the agent may touch. Anything else (extra directories, settings, MCP
+# servers, plugins, permission modes, sandbox or config overrides) needs --allow-any-args.
+SAFE_ARGS = {
+    "claude": {"value": {"--model", "--setting-sources", "--append-system-prompt", "--disallowedTools",
+                         "--disallowed-tools", "--fallback-model", "--effort", "--max-turns"},
+               "flag": {"--strict-mcp-config", "--disable-slash-commands", "--exclude-dynamic-system-prompt-sections"}},
+    "codex": {"value": {"-m", "--model"}, "flag": {"--ignore-user-config", "--ignore-rules"}},
+}
 
 
 def is_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def validate(exp, base: Path) -> list[str]:
+def unsafe_args(host: str, args: list[str]) -> list[str]:
+    """Arguments outside the allow list for this host, including stray positional values."""
+    allowed, bad, i = SAFE_ARGS[host], [], 0
+    while i < len(args):
+        name = args[i].split("=", 1)[0]
+        if name in allowed["value"]:
+            i += 1 if "=" in args[i] else 2
+            continue
+        if name not in allowed["flag"]:
+            bad.append(args[i])
+        i += 1
+    return bad
+
+
+def validate(exp, base: Path, allow_any_args: bool = False) -> list[str]:
     """Every problem in an experiment, found before anything runs. Unknown keys are errors: a typo such as
     "claude_arg" would otherwise make an arm silently identical to the baseline."""
     errors: list[str] = []
@@ -94,6 +117,34 @@ def validate(exp, base: Path) -> list[str]:
         if key in obj and obj[key] is not None and (not isinstance(obj[key], str) or (non_empty and not obj[key])):
             errors.append(f"{label}.{key} must be {'a non-empty ' if non_empty else 'a '}string or null")
 
+    def host_args(obj: dict, label: str) -> None:
+        for host in HOSTS:
+            key = f"{host}_args"
+            if key not in obj:
+                continue
+            strings(obj[key], f"{label}.{key}")
+            if isinstance(obj[key], list) and not allow_any_args:
+                bad = unsafe_args(host, [a for a in obj[key] if isinstance(a, str)])
+                if bad:
+                    errors.append(f"{label}.{key}: {', '.join(bad)} not allowed; they could widen what the agent "
+                                  "may touch (pass --allow-any-args after checking them)")
+
+    root = base.parent.resolve()  # sources must stay under the folder that holds the experiment's folder
+
+    def source(rel, label: str, want_dir: bool) -> None:
+        if not isinstance(rel, str) or not rel or Path(rel).is_absolute() or rel.startswith(("/", "\\")):
+            errors.append(f"{label} '{rel}' must be a relative path")
+            return
+        path = (base / rel).resolve()
+        if not path.is_relative_to(root):
+            errors.append(f"{label} '{rel}' resolves outside {root}; only files under it may be sent to an agent")
+        elif not (path.is_dir() if want_dir else path.is_file()):
+            errors.append(f"{label} '{rel}' is not a {'directory' if want_dir else 'file'}")
+        elif want_dir:
+            escaping = [p for p in path.rglob("*") if p.is_symlink() and not p.resolve().is_relative_to(root)]
+            errors.extend(f"{label} contains a link to outside {root}: {p.relative_to(path).as_posix()}"
+                          for p in escaping)
+
     if not keys(exp, TOP_KEYS, "experiment"):
         return errors
     if not isinstance(exp.get("name"), str) or not NAME_RE.match(exp["name"]):
@@ -109,9 +160,7 @@ def validate(exp, base: Path) -> list[str]:
 
     common = exp.get("common", {})
     if keys(common, COMMON_KEYS, "common"):
-        for key in ("claude_args", "codex_args"):
-            if key in common:
-                strings(common[key], f"common.{key}")
+        host_args(common, "common")
         if "env" in common:
             mapping(common["env"], "common.env")
 
@@ -120,10 +169,12 @@ def validate(exp, base: Path) -> list[str]:
         if not isinstance(task.get("prompt"), str) or not task["prompt"].strip():
             errors.append("task.prompt must be a non-empty string")
         for key, non_empty in (("check", True), ("expect", True), ("claude_tools", False),
-                               ("claude_allowed_tools", True), ("fixture", True)):
+                               ("claude_allowed_tools", True)):
             optional_str(task, key, "task", non_empty)
-        if isinstance(task.get("fixture"), str) and task["fixture"] and not (base / task["fixture"]).is_dir():
-            errors.append(f"task.fixture '{task['fixture']}' is not a directory next to the experiment")
+        if task.get("fixture") is not None:
+            source(task["fixture"], "task.fixture", want_dir=True)
+        if task.get("expect_match", "contains") not in EXPECT_MODES:
+            errors.append(f"task.expect_match must be one of {', '.join(EXPECT_MODES)}")
         timeout = task.get("timeout", 600)
         if not is_number(timeout) or timeout <= 0:
             errors.append(f"task.timeout must be a number of seconds > 0, not {timeout!r}")
@@ -143,9 +194,7 @@ def validate(exp, base: Path) -> list[str]:
         if not isinstance(name, str) or not NAME_RE.match(name):
             errors.append(f"{label}.name must be 1-64 letters, digits, '.', '_' or '-'")
         names.append(name)
-        for key in ("claude_args", "codex_args"):
-            if key in arm:
-                strings(arm[key], f"{label}.{key}")
+        host_args(arm, label)
         for key in ("env", "files", "files_from"):
             if key in arm:
                 mapping(arm[key], f"{label}.{key}")
@@ -154,8 +203,8 @@ def validate(exp, base: Path) -> list[str]:
             if not isinstance(dest, str) or not safe_relative(dest):
                 errors.append(f"{label}: '{dest}' must be a relative path inside the workspace")
         if isinstance(arm.get("files_from"), dict):
-            errors.extend(f"{label}: file '{src}' not found" for src in arm["files_from"].values()
-                          if isinstance(src, str) and not (base / src).is_file())
+            for src in arm["files_from"].values():
+                source(src, f"{label}.files_from", want_dir=False)
     if len(set(map(str, names))) != len(names):
         errors.append("arm names must be unique")
 
@@ -169,13 +218,13 @@ def validate(exp, base: Path) -> list[str]:
     return errors
 
 
-def load_experiment(path: Path) -> dict:
+def load_experiment(path: Path, allow_any_args: bool = False) -> dict:
     try:
         exp = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         raise BenchError(f"cannot read {path}: {e}")
     base = path.resolve().parent
-    errors = validate(exp, base)
+    errors = validate(exp, base, allow_any_args)
     if errors:
         raise BenchError(f"{path.name} has {len(errors)} problem(s):\n  - " + "\n  - ".join(errors))
     exp["_base"] = base
@@ -216,7 +265,7 @@ def fingerprint(exp: dict, seed: int) -> str:
     if fixture:
         root = base / fixture
         sources += [(f"fixture/{p.relative_to(root).as_posix()}", p) for p in sorted(root.rglob("*"))
-                    if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"]
+                    if p.is_file() and not {"__pycache__", ".git"} & set(p.parts) and p.suffix != ".pyc"]
     for arm in exp["arms"]:
         sources += [(f"{arm['name']}/{dest}", base / src) for dest, src in (arm.get("files_from") or {}).items()]
     for label, path in sources:
@@ -264,8 +313,9 @@ def build_command(host: str, binary: str, exp: dict, arm: dict, workspace: Path,
 
 
 def git(cwd: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(cwd), "-c", "user.name=bench", "-c", "user.email=bench@localhost", *args],
-                   check=True, capture_output=True)
+    # Hooks point at a folder that does not exist, so no hook can run while the fixture is committed.
+    subprocess.run(["git", "-C", str(cwd), "-c", "user.name=bench", "-c", "user.email=bench@localhost",
+                    "-c", f"core.hooksPath={cwd / '.bench-no-hooks'}", *args], check=True, capture_output=True)
 
 
 def prepare_workspace(exp: dict, arm: dict) -> Path:
@@ -288,7 +338,7 @@ def prepare_workspace(exp: dict, arm: dict) -> Path:
         target(rel).write_text(text, encoding="utf-8")
     git(workspace, "init", "-q")
     git(workspace, "add", "-A")
-    git(workspace, "commit", "-q", "--allow-empty", "-m", "bench fixture")
+    git(workspace, "commit", "-q", "--no-verify", "--allow-empty", "-m", "bench fixture")
     return workspace
 
 
@@ -453,10 +503,13 @@ def agent_env(exp: dict, arm: dict) -> dict:
     return env
 
 
-def answer_matches(expect: str | None, answer: str | None) -> bool | None:
-    """With task.expect set, the final answer must contain it (case-insensitive); None means not judged."""
+def answer_matches(expect: str | None, answer: str | None, mode: str = "contains") -> bool | None:
+    """With task.expect set, judge the final answer, ignoring case: "contains" finds it anywhere, "exact" needs
+    the whole answer to be it (surrounding spaces and a trailing . or ! allowed). None means not judged."""
     if not expect:
         return None
+    if mode == "exact":
+        return (answer or "").strip().rstrip(".!").strip().lower() == expect.strip().lower()
     return expect.lower() in (answer or "").lower()
 
 
@@ -487,7 +540,8 @@ def run_one(exp: dict, host: str, arm: dict, rnd: int, binary: str, keep: bool,
         metrics["model"] = codex_model(cmd)
     check_exit = run_check(task.get("check"), workspace, task.get("timeout", 600))
     agent_ok = metrics.pop("agent_ok") and code == 0
-    answer_ok = answer_matches(task.get("expect"), metrics.get("answer"))  # judged on the full answer
+    answer_ok = answer_matches(task.get("expect"), metrics.get("answer"),  # judged on the full answer
+                               task.get("expect_match", "contains"))
     metrics["answer"] = (metrics.get("answer") or "")[-2000:]
     record = {"id": uuid.uuid4().hex, "at": now(), "experiment": exp["name"], "host": host, "arm": arm["name"],
               "round": rnd, "seconds": seconds, "exit": code, "agent_ok": agent_ok, "check_exit": check_exit,
@@ -510,7 +564,7 @@ def run_count(args, exp: dict) -> int:
 
 
 def cmd_plan(args) -> int:
-    exp = load_experiment(Path(args.experiment))
+    exp = load_experiment(Path(args.experiment), args.allow_any_args)
     hosts = check_hosts(args.hosts.split(","), "--hosts") if args.hosts is not None else exp["hosts"]
     runs = run_count(args, exp)
     print(f"experiment {exp['name']}: {exp.get('description', '')}")
@@ -522,6 +576,13 @@ def cmd_plan(args) -> int:
             print(f"  {arm['name']}: {' '.join(cmd)}  < prompt on stdin")
             if host == "claude" and any("Bash" in a for a in cmd):
                 print("    warning: this grants Claude a shell, which is not confined to the temporary workspace")
+    task = exp["task"]
+    if task.get("check"):
+        print(f"\ncheck after each run, on this machine and outside any sandbox: {task['check']}")
+    if task.get("expect"):
+        print(f"expect ({task.get('expect_match', 'contains')}): {task['expect']!r}")
+    if args.allow_any_args:
+        print("warning: --allow-any-args lets arms pass any CLI flag; check them above before running")
     total = runs * len(hosts) * len(exp["arms"])
     print(f"\n{total} agent runs ({runs} rounds x {len(hosts)} host(s) x {len(exp['arms'])} arm(s)). "
           "Each one spends real quota or money. Add --yes to `run` to start, and --max-cost to cap the spend.")
@@ -529,7 +590,7 @@ def cmd_plan(args) -> int:
 
 
 def cmd_run(args) -> int:
-    exp = load_experiment(Path(args.experiment))
+    exp = load_experiment(Path(args.experiment), args.allow_any_args)
     if not args.yes:
         cmd_plan(args)
         print("\nnot started: pass --yes to run")
@@ -649,6 +710,12 @@ def complete(group: list[dict], key: str) -> bool:
     return all(r.get(key) is not None for r in group)
 
 
+def same_model(base: list[dict], other: list[dict]) -> bool:
+    """Arms are comparable only if every run names one and the same model, and none is unpinned."""
+    models = {r.get("model") for r in base + other}
+    return len(models) == 1 and None not in models and "unpinned" not in models and "" not in models
+
+
 def summarize(group: list[dict], key: str, rng: random.Random, money: bool = False,
               interval: bool = True) -> tuple[str, list[float] | None]:
     """Mean (and 95% interval) of a column, or "n/a" when any run lacks the value: averaging only the known
@@ -685,16 +752,16 @@ def verdict(ci: tuple[float, float] | None) -> str:
 
 def build_report(runs: list[dict], exp: dict, seed: int = 0) -> str:
     rng = random.Random(seed)
+    lost = interrupted_attempts(runs)
+    runs = [r for r in runs if r.get("status") != "started"]
     lines = [f"# Benchmark: {exp['name']}", "", exp.get("description", ""), "",
-             f"{len(runs)} runs. Cost is reported by Claude Code and estimated for Codex when prices are given. "
+             f"{len(runs)} completed runs. Cost is reported by Claude Code and estimated for Codex when prices are given. "
              "Intervals are 95%. Success uses a Wilson interval at any run count (wide when runs are few); means and "
              "differences use a bootstrap and need at least 3 runs per arm. Unknown values show n/a and are never "
              "counted as zero.", ""]
-    lost = interrupted_attempts(runs)
     if lost:
         lines += [f"**Note:** {len(lost)} call(s) were interrupted before recording a result. They may have cost money "
                   "and are not in the tables.", ""]
-    runs = [r for r in runs if r.get("status") != "started"]
     fingerprints = {r.get("fingerprint") for r in runs if r.get("fingerprint")}
     if len(fingerprints) > 1:
         lines += [f"**Warning:** these runs come from {len(fingerprints)} different experiment versions; "
@@ -720,7 +787,11 @@ def build_report(runs: list[dict], exp: dict, seed: int = 0) -> str:
             cost_text, costs = summarize(group, "cost_usd", rng, money=True)
             input_text, inputs = summarize(group, "total_input", rng)
             output_text, _ = summarize(group, "output", rng, interval=False)
-            per_success = fmt_num(sum(costs) / ok, True) if costs is not None and ok else "n/a"
+            lost_here = sum(1 for r in lost if r.get("host") == host and r.get("arm") == name)
+            if lost_here:  # interrupted calls may have been paid for, so the true total is unknown
+                per_success = f"n/a ({lost_here} interrupted)"
+            else:
+                per_success = fmt_num(sum(costs) / ok, True) if costs is not None and ok else "n/a"
             reads = [r.get("cache_read") for r in group]
             cached = (f"{sum(reads) / sum(inputs):.0%}" if inputs and sum(inputs) and None not in reads else "n/a")
             models = ",".join(sorted({r.get("model") for r in group if r.get("model")})) or "-"
@@ -739,6 +810,10 @@ def build_report(runs: list[dict], exp: dict, seed: int = 0) -> str:
             for name in others:
                 group = groups[name]
                 cells = []
+                if not same_model(base, group):  # a model change would be credited to the configuration
+                    lines.append(f"| {name} | n/a | not comparable (models differ or are unpinned) | n/a | "
+                                 "not comparable (models differ or are unpinned) |")
+                    continue
                 for key, money in (("cost_usd", True), ("total_input", False)):
                     if not (complete(base, key) and complete(group, key)):
                         cells += ["n/a (some values unknown)", "not comparable"]
@@ -776,6 +851,8 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("experiment")
         p.add_argument("--runs", type=int, help="rounds (default: the experiment's runs)")
         p.add_argument("--hosts", help="comma-separated subset, e.g. claude")
+        p.add_argument("--allow-any-args", action="store_true",
+                       help="let arms pass CLI flags outside the safe list (they could widen access)")
         if name == "run":
             p.add_argument("--yes", action="store_true", help="confirm that the runs may spend quota or money")
             p.add_argument("--out", help="results directory (default: .ai/bench/<name>-<time>)")

@@ -24,4 +24,6 @@ Runs the same task headless in fresh workspaces under two or more configurations
 - Never start a run without the user's go-ahead on the run count and the budget.
 - Claude cost comes from the CLI. Codex cost is estimated only when the experiment has `prices` (USD per million tokens). Otherwise compare tokens.
 - `--max-cost` is enforced per call for Claude (each call gets the remaining budget as `--max-budget-usd`). Codex has no per-call limit, so a capped run that includes Codex needs `--allow-overrun`: tell the user that one Codex run can exceed the cap before it is checked.
-- Agents get edit rights inside the temporary workspace: Claude via `acceptEdits` plus an allowed tool list, Codex via the `workspace-write` sandbox. Keep checks and fixtures free of anything you would not run on this machine.
+- Agents get edit rights inside the temporary workspace only: Claude via `acceptEdits` plus an explicit tool list without a shell, Codex via the `workspace-write` sandbox.
+- Treat an experiment file from someone else like code. Its `check` runs on this machine outside any sandbox, and `plan` prints it: read it before you run. Arm flags outside a safe list (extra directories, settings, MCP servers, permission or sandbox overrides) are refused unless you pass `--allow-any-args` after checking them. Fixtures and `files_from` sources must stay under the folder that holds the experiment's folder; a fixture's `.git` is never copied.
+- For one-word answers, use `"expect_match": "exact"`, so that "not ok" does not count as "ok".
