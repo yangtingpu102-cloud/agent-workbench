@@ -7,7 +7,7 @@ Times are UTC. Once a lease time has passed, anyone may take the task.
 |----|------|-------|--------|--------------------|-------------|------|
 | T2 | Try `handoff` and `cross-review` in real Claude Code and Codex sessions | - | open | plugins/workbench-core/skills/ | - | Claude → Codex passed on 2026-10-16; Codex → Claude still to do |
 | T3 | Write `claude plugin eval` cases for both skills | - | open | plugins/workbench-core/evals/ | - | needs Claude Code 2.1.269 or later |
-| T7 | Opportunity #1: A/B token benchmark across Claude Code and Codex | claude@feat/ab-bench | claimed | plugins/workbench-bench/, tests/test_bench.py, docs/, README.md, .gitignore | 2026-10-22 09:50 | lease T7 held |
+| T7 | Opportunity #1: A/B token benchmark across Claude Code and Codex | - | review | plugins/workbench-bench/, plugins/workbench-core/skills/cross-review/, tests/ | - | PR open; 13 Codex review rounds, every finding fixed; no ship review on the final content (stopped by user decision), so the CI gate fails |
 
 ## Done
 | id | task | owner | finished | evidence |
