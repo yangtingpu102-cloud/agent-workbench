@@ -363,6 +363,26 @@ class RunTest(unittest.TestCase):
         self.assertTrue(all(r["success"] for r in runs))
         self.assertTrue(all(len(r["answer"]) == 2000 for r in runs))
 
+    def test_an_interrupted_call_is_recorded_and_blocks_a_capped_resume(self):
+        normal = self.fake_execute
+
+        def interrupted(*args):
+            raise KeyboardInterrupt
+        self.fake_execute = interrupted
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_bench("--runs", "1")
+        self.assertEqual([line.get("status") for line in bench.load_lines(self.out)], ["started"])
+        self.assertEqual(bench.load_runs(self.out), [])
+        self.fake_execute = normal
+        code, out = self.run_bench("--runs", "1", "--max-cost", "5")
+        self.assertEqual(code, bench.EXIT_PARTIAL)
+        self.assertIn("interrupted call", out)
+        code, out = self.run_bench("--runs", "1")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(bench.load_runs(self.out)), 2)
+        report = (self.out / "report.md").read_text(encoding="utf-8")
+        self.assertIn("1 call(s) were interrupted", report)
+
     def test_max_cost_needs_codex_prices(self):
         code, out = self.run_bench("--hosts", "codex", "--max-cost", "1", "--allow-overrun")
         self.assertEqual(code, 2)

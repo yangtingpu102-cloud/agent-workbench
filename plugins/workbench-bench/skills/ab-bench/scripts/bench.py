@@ -300,17 +300,28 @@ def results_path(out_dir: Path) -> Path:
     return out_dir / "runs.jsonl"
 
 
-def load_runs(out_dir: Path) -> list[dict]:
+def load_lines(out_dir: Path) -> list[dict]:
     path = results_path(out_dir)
     if not path.is_file():
         return []
-    runs = []
+    lines = []
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
-            runs.append(json.loads(line))
+            lines.append(json.loads(line))
         except ValueError:
             continue
-    return runs
+    return lines
+
+
+def load_runs(out_dir: Path) -> list[dict]:
+    """Finished runs only. A line with status "started" marks a paid call before it begins."""
+    return [r for r in load_lines(out_dir) if r.get("status") != "started"]
+
+
+def interrupted_attempts(lines: list[dict]) -> list[dict]:
+    """Calls that started but never recorded a result: they may have cost money, by an unknown amount."""
+    finished = {r.get("id") for r in lines if r.get("status") != "started"}
+    return [r for r in lines if r.get("status") == "started" and r.get("id") not in finished]
 
 
 def schedule(exp: dict, hosts: list[str], runs: int, seed: int) -> list[tuple[int, str, dict]]:
@@ -353,7 +364,12 @@ def run_one(exp: dict, host: str, arm: dict, rnd: int, binary: str, keep: bool,
     workspace = prepare_workspace(exp, arm)
     cmd = build_command(host, binary, exp, arm, workspace, budget)
     start = time.monotonic()
-    code, stdout, stderr = execute(cmd, workspace, agent_env(exp, arm), task["prompt"], task.get("timeout", 600))
+    try:
+        code, stdout, stderr = execute(cmd, workspace, agent_env(exp, arm), task["prompt"], task.get("timeout", 600))
+    except BaseException:  # interrupted: do not leave the workspace behind
+        if not keep:
+            shutil.rmtree(workspace, ignore_errors=True)
+        raise
     seconds = round(time.monotonic() - start, 1)
     metrics = parse_claude(stdout) if host == "claude" else parse_codex(stdout, (exp.get("prices") or {}).get(host))
     if host == "codex":
@@ -426,6 +442,7 @@ def cmd_run(args) -> int:
                                      **{k: v for k, v in exp.items() if not k.startswith("_")}},
                                     indent=2, ensure_ascii=False), encoding="utf-8")
     history = load_runs(out_dir)
+    interrupted = interrupted_attempts(load_lines(out_dir))
     done = {(r["host"], r["arm"], r["round"]) for r in history}
     spent = sum(r.get("cost_usd") or 0.0 for r in history)  # a resumed run counts what was already spent
     stopped = False
@@ -433,9 +450,9 @@ def cmd_run(args) -> int:
         for rnd, host, arm in schedule(exp, hosts, runs, args.seed):
             if (host, arm["name"], rnd) in done:
                 continue
-            unknown = [r for r in history if r.get("cost_usd") is None]
+            unknown = [r for r in history if r.get("cost_usd") is None] + interrupted
             if args.max_cost is not None and unknown:
-                print(f"stopped: {len(unknown)} recorded run(s) have no known cost (failed or timed out), so "
+                print(f"stopped: {len(unknown)} recorded run(s) or interrupted call(s) have no known cost, so "
                       "--max-cost cannot be enforced. Inspect them, then resume without --max-cost or use a new --out.")
                 stopped = True
                 break
@@ -450,8 +467,12 @@ def cmd_run(args) -> int:
                     stopped = True
                     break
             budget = args.max_cost - spent if args.max_cost is not None else None
+            attempt = uuid.uuid4().hex  # written before the paid call, so an interruption is never invisible
+            fh.write(json.dumps({"id": attempt, "status": "started", "at": now(), "host": host, "arm": arm["name"],
+                                 "round": rnd, "fingerprint": fp}) + "\n")
+            fh.flush()
             record = run_one(exp, host, arm, rnd, binaries[host], args.keep, budget)
-            record["fingerprint"] = fp
+            record.update({"id": attempt, "status": "done", "fingerprint": fp})
             history.append(record)
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
             fh.flush()
@@ -465,7 +486,7 @@ def cmd_run(args) -> int:
                 print("stopped: that run's cost is unknown, so --max-cost can no longer be enforced.")
                 stopped = True
                 break
-    report = build_report(load_runs(out_dir), exp)
+    report = build_report(load_lines(out_dir), exp)
     (out_dir / "report.md").write_text(report, encoding="utf-8")
     print(f"\nresults: {out_dir.as_posix()}/runs.jsonl, report: {out_dir.as_posix()}/report.md"
           + (" (partial: stopped before every run finished)" if stopped else ""))
@@ -550,6 +571,11 @@ def build_report(runs: list[dict], exp: dict, seed: int = 0) -> str:
              "Intervals are 95%. Success uses a Wilson interval at any run count (wide when runs are few); means and "
              "differences use a bootstrap and need at least 3 runs per arm. Unknown values show n/a and are never "
              "counted as zero.", ""]
+    lost = interrupted_attempts(runs)
+    if lost:
+        lines += [f"**Note:** {len(lost)} call(s) were interrupted before recording a result. They may have cost money "
+                  "and are not in the tables.", ""]
+    runs = [r for r in runs if r.get("status") != "started"]
     fingerprints = {r.get("fingerprint") for r in runs if r.get("fingerprint")}
     if len(fingerprints) > 1:
         lines += [f"**Warning:** these runs come from {len(fingerprints)} different experiment versions; "
@@ -613,7 +639,7 @@ def build_report(runs: list[dict], exp: dict, seed: int = 0) -> str:
 
 def cmd_report(args) -> int:
     out_dir = Path(args.results)
-    runs = load_runs(out_dir)
+    runs = load_lines(out_dir)
     exp_path = out_dir / "experiment.json"
     if not runs or not exp_path.is_file():
         raise BenchError(f"no runs.jsonl and experiment.json in {out_dir}")
