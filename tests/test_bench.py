@@ -179,6 +179,7 @@ class ExperimentTest(unittest.TestCase):
     def test_invalid_experiments_are_rejected(self):
         base = {"name": "x", "task": {"prompt": "p"}, "arms": [{"name": "a"}]}
         for bad in ({**base, "arms": [{"name": "a"}, {"name": "a"}]}, {**base, "hosts": ["gemini"]},
+                    {**base, "hosts": ["claude", "claude"]}, {**base, "hosts": []}, {**base, "hosts": "claude"},
                     {**base, "task": {"prompt": "p", "fixture": "missing"}}, {**base, "task": {}}):
             with self.assertRaises(bench.BenchError):
                 bench.load_experiment(self.write_exp(bad))
@@ -358,6 +359,12 @@ class RunTest(unittest.TestCase):
         self.fake_execute = shadow
         self.run_bench("--runs", "1")
         self.assertFalse(any(r["success"] for r in bench.load_runs(self.out)))
+
+    def test_hosts_must_be_known_and_unique(self):
+        for value in ("claude,claude", "gemini", ""):
+            code, out = self.run_bench("--hosts", value)
+            self.assertEqual(code, 2, value)
+        self.assertEqual(self.calls, [])
 
     def test_zero_or_negative_runs_never_start(self):
         for value in ("0", "-1"):

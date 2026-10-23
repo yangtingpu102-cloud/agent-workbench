@@ -70,10 +70,7 @@ def load_experiment(path: Path) -> dict:
     runs = exp.get("runs", 3)
     if not is_count(runs) or runs < 1:
         raise BenchError(f"runs must be a whole number >= 1, not {runs!r}")
-    exp["hosts"] = [h for h in exp.get("hosts", list(HOSTS))]
-    unknown = [h for h in exp["hosts"] if h not in HOSTS]
-    if unknown:
-        raise BenchError(f"unknown host(s): {', '.join(unknown)}")
+    exp["hosts"] = check_hosts(exp.get("hosts", list(HOSTS)), "hosts")
     fixture = exp["task"].get("fixture")
     if fixture and not (base / fixture).is_dir():
         raise BenchError(f"fixture {fixture} not found next to {path.name}")
@@ -90,6 +87,20 @@ def load_experiment(path: Path) -> dict:
                    for v in values):
             raise BenchError(f"prices.{host} needs numbers >= 0 for {', '.join(PRICE_KEYS)} (USD per million tokens)")
     return exp
+
+
+def check_hosts(hosts, label: str) -> list[str]:
+    """Supported, non-empty and unique: a repeated host would schedule extra paid calls per arm and round."""
+    if not isinstance(hosts, list) or not all(isinstance(h, str) for h in hosts):
+        raise BenchError(f"{label} must be a list of host names")
+    hosts = [h.strip() for h in hosts]
+    unknown = [h for h in hosts if h not in HOSTS]
+    if not hosts or unknown:
+        raise BenchError(f"{label}: use one or more of {', '.join(HOSTS)}" + (f" (unknown: {', '.join(unknown)})"
+                                                                                if unknown else ""))
+    if len(set(hosts)) != len(hosts):
+        raise BenchError(f"{label} lists a host more than once: {', '.join(hosts)}")
+    return hosts
 
 
 def safe_relative(rel: str) -> bool:
@@ -406,7 +417,7 @@ def run_count(args, exp: dict) -> int:
 
 def cmd_plan(args) -> int:
     exp = load_experiment(Path(args.experiment))
-    hosts = args.hosts.split(",") if args.hosts else exp["hosts"]
+    hosts = check_hosts(args.hosts.split(","), "--hosts") if args.hosts is not None else exp["hosts"]
     runs = run_count(args, exp)
     print(f"experiment {exp['name']}: {exp.get('description', '')}")
     for host in hosts:
@@ -429,7 +440,7 @@ def cmd_run(args) -> int:
         cmd_plan(args)
         print("\nnot started: pass --yes to run")
         return 1
-    hosts = args.hosts.split(",") if args.hosts else exp["hosts"]
+    hosts = check_hosts(args.hosts.split(","), "--hosts") if args.hosts is not None else exp["hosts"]
     runs = run_count(args, exp)
     binaries = {h: find_binary(h) for h in hosts}
     missing = [h for h, b in binaries.items() if not b]
