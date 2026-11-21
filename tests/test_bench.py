@@ -372,6 +372,28 @@ class UntrustedExperimentTest(unittest.TestCase):
             import shutil
             shutil.rmtree(workspace, ignore_errors=True)
 
+    def test_a_fixture_cannot_bring_its_own_hooks_directory(self):
+        """Codex review of PR #4 (P1): `--no-verify` skips only pre-commit and commit-msg, so a fixture that ships
+        `.bench-no-hooks/prepare-commit-msg` must not be able to make the hooks directory real."""
+        import shutil
+        marker_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, marker_dir, True)
+        marker = marker_dir / "ran.txt"  # outside the workspace: a hook that ran would write it
+        fixture = self.root / "fx"
+        hooks = fixture / ".bench-no-hooks"
+        hooks.mkdir(parents=True)
+        hook = hooks / "prepare-commit-msg"
+        hook.write_text(f"#!/bin/sh\necho pwned > '{marker.as_posix()}'\n", encoding="utf-8", newline="\n")
+        hook.chmod(0o755)
+        (fixture / "a.txt").write_text("a", encoding="utf-8")
+        exp = self.load({"task": {"prompt": "p", "fixture": "../fx"}, "arms": [{"name": "a"}]})
+        workspace = bench.prepare_workspace(exp, exp["arms"][0])
+        try:
+            self.assertFalse(marker.exists(), "a hook shipped in the fixture ran on the host")
+            self.assertTrue((workspace / "a.txt").is_file())
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+
     def test_plan_shows_the_check_command(self):
         buf = io.StringIO()
         with mock.patch.object(bench, "find_binary", lambda host: "bin"), contextlib.redirect_stdout(buf):

@@ -323,10 +323,11 @@ def build_command(host: str, binary: str, exp: dict, arm: dict, workspace: Path,
     return cmd + list(common.get("codex_args", [])) + list(arm.get("codex_args", [])) + ["-"]
 
 
-def git(cwd: Path, *args: str) -> None:
-    # Hooks point at a folder that does not exist, so no hook can run while the fixture is committed.
+def git(cwd: Path, hooks: Path, *args: str) -> None:
+    # `hooks` is an empty directory we created outside anything the fixture controls, so no hook can run while the
+    # fixture is committed. (--no-verify alone is not enough: it skips pre-commit and commit-msg, not the rest.)
     subprocess.run(["git", "-C", str(cwd), "-c", "user.name=bench", "-c", "user.email=bench@localhost",
-                    "-c", f"core.hooksPath={cwd / '.bench-no-hooks'}", *args], check=True, capture_output=True)
+                    "-c", f"core.hooksPath={hooks}", *args], check=True, capture_output=True)
 
 
 def prepare_workspace(exp: dict, arm: dict) -> Path:
@@ -347,9 +348,13 @@ def prepare_workspace(exp: dict, arm: dict) -> Path:
         shutil.copyfile(exp["_base"] / src, target(rel))
     for rel, text in (arm.get("files") or {}).items():
         target(rel).write_text(text, encoding="utf-8")
-    git(workspace, "init", "-q")
-    git(workspace, "add", "-A")
-    git(workspace, "commit", "-q", "--no-verify", "--allow-empty", "-m", "bench fixture")
+    no_hooks = Path(tempfile.mkdtemp(prefix="wb-bench-nohooks-")).resolve()  # empty, and not part of the workspace
+    try:
+        git(workspace, no_hooks, "init", "-q")
+        git(workspace, no_hooks, "add", "-A")
+        git(workspace, no_hooks, "commit", "-q", "--no-verify", "--allow-empty", "-m", "bench fixture")
+    finally:
+        shutil.rmtree(no_hooks, ignore_errors=True)
     return workspace
 
 
