@@ -296,6 +296,33 @@ def fetch_pr_comments(repo: str, pr: int) -> list[dict]:
     return [json.loads(line) for line in r.stdout.splitlines() if line.strip()]
 
 
+def fetch_pr_base_changes(repo: str, pr: int) -> list[str]:
+    """When the pull request's base branch was changed (retargeted), from its timeline. Tests replace this."""
+    jq = '.[] | select(.event == "base_ref_changed") | .created_at'
+    try:
+        r = subprocess.run(["gh", "api", "--paginate", f"repos/{repo}/issues/{pr}/timeline", "--jq", jq],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        raise VerifyError("--github-pr needs the gh CLI")
+    if r.returncode != 0:
+        raise VerifyError(f"could not read the timeline of {repo}#{pr}: {r.stderr.strip()[:300]}")
+    return [line.strip() for line in r.stdout.splitlines() if line.strip()]
+
+
+def parse_time(text) -> dt.datetime | None:
+    try:
+        return dt.datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def review_start(comment: dict) -> dt.datetime | None:
+    """When the latest Codex review started: the earliest time the summary itself states (the table row of the
+    running or finished review), otherwise when the comment was last updated."""
+    stated = [t for t in map(parse_time, re.findall(r'datetime="([^"]+)"', comment.get("body") or "")) if t]
+    return min(stated) if stated else parse_time(comment.get("updated_at") or comment.get("created_at"))
+
+
 def change_authors(top: Path, base: str | None, rev: str) -> set[str]:
     """Agents credited in the commits since the base: a Claude co-author trailer, or Codex in the author or a
     trailer. Used so that Codex cannot supply the independent review of its own change."""
@@ -313,10 +340,11 @@ def change_authors(top: Path, base: str | None, rev: str) -> set[str]:
     return authors
 
 
-def codex_github_reviews(top: Path, comments: list[dict], bots: set[str], rev: str,
-                         base: str | None) -> tuple[list[dict], list[str]]:
+def codex_github_reviews(top: Path, comments: list[dict], bots: set[str], rev: str, base: str | None,
+                         base_changes: list[str] | None = None) -> tuple[list[dict], list[str]]:
     """Codex's review state on the pull request, as review records the gate already understands. A GitHub
-    review covers the whole pull request, so its coverage starts at the merge base."""
+    review covers the pull request as it was when the review started. The reviewed base is not recorded, so a
+    change of the PR's base after that moment (which can add unreviewed commits) makes the review stale."""
     authors = change_authors(top, base, rev)
     author = "codex" if "codex" in authors else (",".join(sorted(authors)) or "unknown")
     merge_base = git(top, "merge-base", base, rev, check=False) if base else None
@@ -340,12 +368,19 @@ def codex_github_reviews(top: Path, comments: list[dict], bots: set[str], rev: s
         else:
             verdict = "fix-first"
         content = content_id(top, sha) if isinstance(sha, str) and has_commit(top, sha) else None
+        start, stale = review_start(comment), None
+        for changed in base_changes or []:
+            when = parse_time(changed)
+            if start is None or when is None or when > start:  # unknown times count against the review
+                stale = f"the pull request's base branch was changed ({changed}) after this review started"
+                break
         notes.append(f"Codex on GitHub: {status or 'unknown status'} for {str(sha)[:10]}"
-                     + (f", {verdict}" if verdict else "") + ("" if content else " (commit not available here)"))
+                     + (f", {verdict}" if verdict else "") + ("" if content else " (commit not available here)")
+                     + (", stale" if stale else ""))
         records.append({"id": f"github-{comment.get('id')}-{sha}", "at": comment.get("updated_at") or comment.get("created_at"),
                         "peer": "codex", "author": author, "content": content, "verdict": verdict,
                         "complete": True, "base_sha": merge_base, "source": "github", "status": status,
-                        "url": comment.get("html_url")})
+                        "stale_reason": stale, "url": comment.get("html_url")})
     return records, notes
 
 
@@ -359,6 +394,9 @@ def check_review(top: Path, reviews: list[dict], cid: str, rev: str, base: str |
         found = [f"{r.get('verdict')} by {r.get('peer')} for {r.get('author')}" for r in reviews]
         return ("no review of this content by an agent other than its author"
                 + (f" (found: {', '.join(found)})" if found else "") + ". Run cross-review, then `verify.py collect`")
+    if review.get("stale_reason"):
+        return (f"Codex's GitHub review of this content is stale: {review['stale_reason']}, so it may not cover the "
+                "whole change. Comment @codex review on the PR again")
     if review.get("source") == "github" and review.get("verdict") is None:
         return (f"Codex's GitHub review of this content is {review.get('status') or 'not finished'}; "
                 "re-run this check once it completes")
@@ -381,6 +419,10 @@ def check_review(top: Path, reviews: list[dict], cid: str, rev: str, base: str |
 
 
 def cmd_gate(args) -> int:
+    if args.github_pr is not None and not args.base:
+        # Without the base there is no way to tell which commits are the change, so Codex could not be recognised
+        # as its author, and a GitHub review could not be tied to what the pull request contains.
+        raise VerifyError("--github-pr needs --base (the pull request's base commit or branch)")
     top = repo_top()
     rev = args.rev or "HEAD"
     cid = content_id(top, rev)
@@ -416,7 +458,7 @@ def cmd_gate(args) -> int:
                     raise VerifyError("--github-pr needs --github-repo owner/name (CI sets GITHUB_REPOSITORY)")
                 bots = set(args.codex_bot or [CODEX_BOT])
                 records, notes = codex_github_reviews(top, fetch_pr_comments(repo, args.github_pr), bots, rev,
-                                                      args.base)
+                                                      args.base, fetch_pr_base_changes(repo, args.github_pr))
                 for note in notes:
                     print(f"note  {note}")
                 merge_reviews(pool, records)

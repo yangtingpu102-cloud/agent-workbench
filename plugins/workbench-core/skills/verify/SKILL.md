@@ -22,5 +22,5 @@ No second agent installed here? Push the branch, open the pull request and comme
 - The latest run and the latest independent review decide: an older pass does not outweigh a newer failure or `fix-first`.
 - If the gate finds no evidence for the content, the code or checks changed after the run: repeat steps 2 and 3.
 - The author of a change cannot supply its `ship` review: the gate accepts only reviews where the peer differs from the author. Codex counts as the author when it appears in the commits' author or `Co-authored-by`.
-- A GitHub review counts only when it comes from the Codex integration's bot account, is finished, and covers content identical to the PR's. Never copy or edit review records to make the gate pass.
+- A GitHub review counts only when it comes from the Codex integration's bot account, is finished, covers content identical to the PR's, and the PR's base was not changed after the review started. `--github-pr` always needs `--base`. Never copy or edit review records to make the gate pass.
 - Evidence records what was checked; it is not a security control.

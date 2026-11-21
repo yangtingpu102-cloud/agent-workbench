@@ -326,17 +326,54 @@ class VerifyTest(unittest.TestCase):
         self.commit("evidence")
         return work
 
-    def gate_github(self, comments: list[dict], *extra: str) -> tuple[int, str]:
+    def gate_github(self, comments: list[dict], *extra: str, base_changes: list[str] | None = None,
+                    base_args: tuple[str, ...] = ("--base", "main")) -> tuple[int, str]:
         old = os.getcwd()
         os.chdir(self.repo)
         buf = io.StringIO()
         try:
             with mock.patch.object(verify, "fetch_pr_comments", lambda repo, pr: comments), \
+                    mock.patch.object(verify, "fetch_pr_base_changes", lambda repo, pr: base_changes or []), \
                     contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                code = verify.main(["gate", "--base", "main", "--github-pr", "4", "--github-repo", "o/r", *extra])
+                code = verify.main(["gate", *base_args, "--github-pr", "4", "--github-repo", "o/r", *extra])
         finally:
             os.chdir(old)
         return code, buf.getvalue()
+
+    def test_a_github_review_needs_a_base(self):
+        """Codex review of PR #5 (P2): without --base the author was always 'unknown', so Codex could review
+        work credited to itself. A GitHub review is now judged only against an explicit base."""
+        work = self.feature_with_evidence("\n\nCo-authored-by: Codex <codex@example.com>")
+        code, out = self.gate_github([self.codex_comment(work)], base_args=())
+        self.assertEqual(code, 2)
+        self.assertIn("--github-pr needs --base", out)
+
+    def test_a_review_started_before_the_base_was_changed_is_stale(self):
+        """Codex review of PR #5 (P2): retargeting the PR to an earlier base after the review adds commits Codex
+        never saw, so the review must not be credited with the new scope."""
+        work = self.feature_with_evidence()
+        comment = self.codex_comment(work)  # state is completed; the summary says the review began at 07:16
+        comment["body"] += '\nRunning since <relative-time datetime="2026-01-01T07:16:07.585424Z">x</relative-time>'
+        code, out = self.gate_github([comment], base_changes=["2026-01-01T08:00:00Z"])
+        self.assertEqual(code, 1)
+        self.assertIn("is stale", out)
+        self.assertIn("@codex review", out)
+
+    def test_a_base_change_before_the_review_started_does_not_count_against_it(self):
+        work = self.feature_with_evidence()
+        comment = self.codex_comment(work)
+        comment["body"] += '\nRunning since <relative-time datetime="2026-01-01T07:16:07.585424Z">x</relative-time>'
+        code, out = self.gate_github([comment], base_changes=["2026-01-01T06:00:00Z"])
+        self.assertEqual(code, 0, out)
+
+    def test_without_stated_times_a_later_base_change_still_counts(self):
+        work = self.feature_with_evidence()
+        comment = self.codex_comment(work)  # updated_at is 2026-01-01T00:00:01Z
+        code, out = self.gate_github([comment], base_changes=["2026-01-02T00:00:00Z"])
+        self.assertEqual(code, 1)
+        self.assertIn("is stale", out)
+        code, out = self.gate_github([comment], base_changes=["not a time"])  # unreadable times are not trusted
+        self.assertEqual(code, 1)
 
     def test_a_finished_codex_review_without_findings_satisfies_the_gate(self):
         work = self.feature_with_evidence()

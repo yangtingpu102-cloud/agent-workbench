@@ -51,7 +51,9 @@ open ──claim──▶ claimed ──完成實作──▶ review ──另�
      - 只認 `chatgpt-codex-connector[bot]` 這個機器人帳號（用 `--codex-bot` 可改名），其他人偽造同樣格式的留言不算。
      - 審查必須是**完成**狀態、**沒有未解決的發現**，而且審查的 commit 內容要和 PR 目前的內容相同（內容雜湊，不是 commit 編號）。Codex 還在跑時 gate 會等，不會通過。
      - Codex 審查自己寫的改動時不算數：commit 的作者或 `Co-authored-by` 出現 Codex，就當作 Codex 是作者。
-     - Codex 完成審查會送出一則 review，CI 會因此重新跑一次 gate。這個自動重跑還沒有在實際環境觀察過；沒有觸發時，手動重跑 gate 即可。
+     - `--github-pr` 一定要搭配 `--base`：沒有 base 就分不出哪些 commit 是這次的改動，也就認不出作者是不是 Codex，所以直接報錯。
+     - GitHub 的審查沒有記錄當時比對的 base。PR 的 base 分支在審查**開始之後**被改過（改指到別的分支，可能多出沒審過的 commit），這份審查就視為過期，要再留言 `@codex review` 一次。審查開始的時間取自 Codex 摘要裡寫的時間；讀不到或無法解析時，一律當作過期。
+     - Codex 完成審查會送出一則 review，CI 會因此重新跑一次 gate。這個自動重跑已經在 PR #5 觀察到：Codex 完成後約 2 分鐘，`pull_request_review` 觸發的 gate 就跑起來並讀到它的結論。沒有觸發時，手動重跑 gate 即可。
 6. **結束必交接**：暫停或換手前，用 `handoff` skill 覆寫 `.ai/HANDOFF.md`。
 
 ## 三種協作模式
