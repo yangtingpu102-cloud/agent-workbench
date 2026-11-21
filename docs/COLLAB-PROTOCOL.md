@@ -47,6 +47,13 @@ open ──claim──▶ claimed ──完成實作──▶ review ──另�
    - commit 之後執行 `verify.py run --base main`（連同 base 要求的檢查一起跑）：在乾淨的工作目錄跑 `.ai/verify.json` 的檢查，記下指令、結束碼、輸出雜湊，並收進同一份內容的審查紀錄。
    - 證據存成 `.ai/verifications/<內容雜湊>.json` 並 commit。內容雜湊不含 `.ai/`（但包含 `.ai/verify.json`），所以更新看板或 HANDOFF 不會讓證據失效；改了程式碼或檢查設定就會失效。
    - CI 的 `gate` 在 PR 上檢查：最新一次檢查通過，而且至少包含**目前 base 分支**要求的檢查（名稱與指令都要相符，PR 只能加嚴、不能放寬）；作者以外的 agent 最新一次審查是 `ship`、看到了全部內容，並且涵蓋 PR base 以來的全部改動。缺一項就擋下合併。
+   - **審查也可以來自 GitHub 上的 Codex**：在 PR 留言 `@codex review`，Codex 的整合會在 PR 留下審查摘要，並附上機器可讀的狀態（審查的 commit、是否完成、有沒有未解決的發現）。CI 的 `gate` 加上 `--github-pr` 之後會讀這則摘要：
+     - 只認 `chatgpt-codex-connector[bot]` 這個機器人帳號（用 `--codex-bot` 可改名），其他人偽造同樣格式的留言不算。
+     - 審查必須是**完成**狀態、**沒有未解決的發現**，而且審查的 commit 內容要和 PR 目前的內容相同（內容雜湊，不是 commit 編號）。Codex 還在跑時 gate 會等，不會通過。
+     - Codex 審查自己寫的改動時不算數：commit 的作者或 `Co-authored-by` 出現 Codex，就當作 Codex 是作者。
+     - `--github-pr` 一定要搭配 `--base`：沒有 base 就分不出哪些 commit 是這次的改動，也就認不出作者是不是 Codex，所以直接報錯。
+     - GitHub 的審查沒有記錄當時比對的 base。PR 的 base 分支在審查**開始之後**被改過（改指到別的分支，可能多出沒審過的 commit），這份審查就視為過期，要再留言 `@codex review` 一次。審查開始的時間取自 Codex 摘要裡寫的時間；讀不到或無法解析時，一律當作過期。
+     - Codex 完成審查會送出一則 review，CI 會因此重新跑一次 gate。這個自動重跑已經在 PR #5 觀察到：Codex 完成後約 2 分鐘，`pull_request_review` 觸發的 gate 就跑起來並讀到它的結論。沒有觸發時，手動重跑 gate 即可。
 6. **結束必交接**：暫停或換手前，用 `handoff` skill 覆寫 `.ai/HANDOFF.md`。
 
 ## 三種協作模式

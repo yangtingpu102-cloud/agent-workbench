@@ -1,0 +1,64 @@
+{
+  "content": "6e7d319d9c769a44d1ecadf7f0ee5a7ea7039b93",
+  "runs": [
+    {
+      "id": "7d4ee580e696463798c7e367e8a5ba29",
+      "at": "2026-11-21T07:24:58.701617Z",
+      "host": "claude",
+      "head": "47dbe3a70e0bc3b7a889b8cc82045885f0b04dd0",
+      "branch": "feat/gate-github-review",
+      "platform": "win32",
+      "python": "3.13.9",
+      "checks": [
+        {
+          "name": "unit tests",
+          "run": "python -m unittest discover -s tests",
+          "exit": 0,
+          "seconds": 60.1,
+          "output_sha256": "d075d6131db3514331a35772d69cbc1dd6f87491a6b5e3a778274853c5b2e61d",
+          "tail": [
+            "..........................................................................",
+            "----------------------------------------------------------------------",
+            "Ran 74 tests in 59.529s",
+            "",
+            "OK"
+          ]
+        },
+        {
+          "name": "validate",
+          "run": "python scripts/wb.py validate",
+          "exit": 0,
+          "seconds": 0.4,
+          "output_sha256": "a4b9a5c943a15f19e874b21e9c265d3a7e454974f6616c9381f481173c7e86bf",
+          "tail": [
+            "2 plugins, 4 skills: 0 errors, 0 warnings"
+          ]
+        },
+        {
+          "name": "instruction budget",
+          "run": "python scripts/wb.py lint --no-global --max-tokens 3000",
+          "exit": 0,
+          "seconds": 0.3,
+          "output_sha256": "eb628a16029173ee43c7a8a422d20f3bd39ecdd53496420af9546a4c2c0bac9a",
+          "tail": [
+            "Instruction budget for C:\\Users\\USER\\Documents\\agent-workbench",
+            "(estimated: ASCII/4 + 1 per non-ASCII char; skill metadata is always estimated)",
+            "",
+            "Claude Code: loaded every session",
+            "       91  CLAUDE.md  (project)",
+            "      624  AGENTS.md  (project, @import)",
+            "      715  TOTAL  (project 715, user 0)",
+            "",
+            "Codex: loaded every session at the repo root",
+            "      624  AGENTS.md  (project)",
+            "      624  TOTAL  (project 624, user 0)",
+            "",
+            "info  4 plugin skill(s) under plugins/ are not counted: they load only where the plugin is installed (see `wb.py budget`)"
+          ]
+        }
+      ],
+      "passed": true
+    }
+  ],
+  "reviews": []
+}

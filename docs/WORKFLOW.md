@@ -42,6 +42,8 @@
    - `claude plugin details <plugin>`：官方的 projected token cost。
    - `claude plugin eval plugins/<plugin> --max-cost-usd 5`：有／無 plugin 的對照組，會花錢。
 7. **交叉審查與證據**：commit 之後，請另一個 AI 用 `cross-review --base main` 審查整個改動，修到結論是 `ship`；再執行 `python plugins/workbench-core/skills/verify/scripts/verify.py run --host <你> --base main`，把 `.ai/verifications/` 也 commit。PR 上的 CI `gate` 會檢查這份證據。
+
+   **不想在本機設定另一個 AI 時**：把分支推上 GitHub、開 PR，然後在 PR 留言 `@codex review`，讓 GitHub 上的 Codex 審查（需要先在 ChatGPT 的 Codex 設定裡連接這個 repo）。CI 的 `gate` 會讀 Codex 的審查結果；有未解決的發現就修正、推送，再留言一次。本機就不需要 Codex 的路徑、hook 信任或命令列登入。
 8. **發佈**：開 PR，等 CI 綠燈後合併。接著把兩份 manifest 的 `version` 一起升版，執行 `claude plugin tag plugins/<plugin>`，再推送 tag。
 9. **使用者安裝**：
 

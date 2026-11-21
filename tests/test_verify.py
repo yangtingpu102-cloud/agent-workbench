@@ -1,6 +1,8 @@
 """Tests for the verify skill and the evidence records written by cross-review."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -8,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILLS = ROOT / "plugins" / "workbench-core" / "skills"
@@ -294,6 +297,159 @@ class VerifyTest(unittest.TestCase):
         self.assertEqual(verify.latest(reviews)["id"], "b")
         mixed = [{"id": "new", "at": "2026-01-01T00:00:01.500000Z"}, {"id": "old", "at": "2026-01-01T00:00:01Z"}]
         self.assertEqual(verify.latest(mixed)["id"], "new")
+
+
+    # ---- Codex's review on GitHub as evidence ----
+
+    def codex_comment(self, sha: str, status: str = "completed", unresolved: bool | None = False,
+                      any_findings: bool | None = None, login: str = "chatgpt-codex-connector[bot]",
+                      kind: str = "Bot", comment_id: int = 1, raw_state: str | None = None) -> dict:
+        state = raw_state or json.dumps({"code_review": {
+            "commit_sha": sha, "status": status, "has_unresolved_findings": unresolved,
+            "has_any_findings": unresolved if any_findings is None else any_findings},
+            "security_review": {"commit_sha": None, "status": None}})
+        body = ("<!-- codex-pull-request-review-summary -->\n"
+                f"<!-- codex-review-state:v1 {state} -->\n\nCodex Review Summary")
+        return {"id": comment_id, "login": login, "type": kind, "body": body,
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:01Z", "html_url": "u"}
+
+    def feature_with_evidence(self, trailer: str = "") -> str:
+        """A feature branch off main with passing evidence committed; returns the commit that holds the work."""
+        self.config([PASS], require_review=True, commit=True)
+        self.git("switch", "-q", "-c", "feature")
+        self.write("app.py", "x = 2\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "feature work" + trailer)
+        work = self.git("rev-parse", "HEAD")
+        code, out = self.verify("run", "--host", "claude", "--base", "main")
+        self.assertEqual(code, 0, out)
+        self.commit("evidence")
+        return work
+
+    def gate_github(self, comments: list[dict], *extra: str, base_changes: list[str] | None = None,
+                    base_args: tuple[str, ...] = ("--base", "main")) -> tuple[int, str]:
+        old = os.getcwd()
+        os.chdir(self.repo)
+        buf = io.StringIO()
+        try:
+            with mock.patch.object(verify, "fetch_pr_comments", lambda repo, pr: comments), \
+                    mock.patch.object(verify, "fetch_pr_base_changes", lambda repo, pr: base_changes or []), \
+                    contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                code = verify.main(["gate", *base_args, "--github-pr", "4", "--github-repo", "o/r", *extra])
+        finally:
+            os.chdir(old)
+        return code, buf.getvalue()
+
+    def test_a_github_review_needs_a_base(self):
+        """Codex review of PR #5 (P2): without --base the author was always 'unknown', so Codex could review
+        work credited to itself. A GitHub review is now judged only against an explicit base."""
+        work = self.feature_with_evidence("\n\nCo-authored-by: Codex <codex@example.com>")
+        code, out = self.gate_github([self.codex_comment(work)], base_args=())
+        self.assertEqual(code, 2)
+        self.assertIn("--github-pr needs --base", out)
+
+    def test_a_review_started_before_the_base_was_changed_is_stale(self):
+        """Codex review of PR #5 (P2): retargeting the PR to an earlier base after the review adds commits Codex
+        never saw, so the review must not be credited with the new scope."""
+        work = self.feature_with_evidence()
+        comment = self.codex_comment(work)  # state is completed; the summary says the review began at 07:16
+        comment["body"] += '\nRunning since <relative-time datetime="2026-01-01T07:16:07.585424Z">x</relative-time>'
+        code, out = self.gate_github([comment], base_changes=["2026-01-01T08:00:00Z"])
+        self.assertEqual(code, 1)
+        self.assertIn("is stale", out)
+        self.assertIn("@codex review", out)
+
+    def test_a_base_change_before_the_review_started_does_not_count_against_it(self):
+        work = self.feature_with_evidence()
+        comment = self.codex_comment(work)
+        comment["body"] += '\nRunning since <relative-time datetime="2026-01-01T07:16:07.585424Z">x</relative-time>'
+        code, out = self.gate_github([comment], base_changes=["2026-01-01T06:00:00Z"])
+        self.assertEqual(code, 0, out)
+
+    def test_without_stated_times_a_later_base_change_still_counts(self):
+        work = self.feature_with_evidence()
+        comment = self.codex_comment(work)  # updated_at is 2026-01-01T00:00:01Z
+        code, out = self.gate_github([comment], base_changes=["2026-01-02T00:00:00Z"])
+        self.assertEqual(code, 1)
+        self.assertIn("is stale", out)
+        code, out = self.gate_github([comment], base_changes=["not a time"])  # unreadable times are not trusted
+        self.assertEqual(code, 1)
+
+    def test_a_finished_codex_review_without_findings_satisfies_the_gate(self):
+        work = self.feature_with_evidence()
+        code, out = self.gate_github([self.codex_comment(work)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("ship by codex", out)
+        self.assertNotEqual(self.verify("gate", "--base", "main")[0], 0)  # without --github-pr there is no review
+
+    def test_unresolved_codex_findings_block_the_gate(self):
+        work = self.feature_with_evidence()
+        code, out = self.gate_github([self.codex_comment(work, unresolved=True)])
+        self.assertEqual(code, 1)
+        self.assertIn("says fix-first", out)
+        self.assertIn("@codex review", out)
+
+    def test_a_codex_review_that_is_still_running_blocks_until_it_finishes(self):
+        work = self.feature_with_evidence()
+        code, out = self.gate_github([self.codex_comment(work, status="running", unresolved=None)])
+        self.assertEqual(code, 1)
+        self.assertIn("is running", out)
+
+    def test_a_codex_review_of_older_content_does_not_count(self):
+        work = self.feature_with_evidence()
+        self.write("app.py", "x = 9\n")
+        self.commit("later change")
+        self.assertEqual(self.verify("run", "--host", "claude", "--base", "main")[0], 0)
+        self.commit("evidence again")
+        code, out = self.gate_github([self.codex_comment(work)])
+        self.assertEqual(code, 1)
+        self.assertIn("no review of this content", out)
+
+    def test_only_the_codex_integration_account_can_speak_for_codex(self):
+        work = self.feature_with_evidence()
+        for forged in (self.codex_comment(work, login="mallory", kind="User"),
+                       self.codex_comment(work, kind="User"),  # right name, but not a bot account
+                       self.codex_comment(work, login="mallory", kind="Bot")):
+            code, out = self.gate_github([forged])
+            self.assertEqual(code, 1, forged["login"])
+        code, out = self.gate_github([self.codex_comment(work, login="my-codex[bot]")], "--codex-bot", "my-codex[bot]")
+        self.assertEqual(code, 0, out)
+
+    def test_codex_cannot_be_the_independent_reviewer_of_its_own_change(self):
+        work = self.feature_with_evidence("\n\nCo-authored-by: Codex <codex@example.com>")
+        code, out = self.gate_github([self.codex_comment(work)])
+        self.assertEqual(code, 1)
+        self.assertIn("other than its author", out)
+
+    def test_github_review_needs_a_repository(self):
+        self.feature_with_evidence()
+        old = os.getcwd()
+        os.chdir(self.repo)
+        try:
+            env = {k: v for k, v in os.environ.items() if k != "GITHUB_REPOSITORY"}
+            with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                code = verify.main(["gate", "--base", "main", "--github-pr", "4"])
+        finally:
+            os.chdir(old)
+        self.assertEqual(code, 2)
+
+    def test_codex_state_parsing_is_conservative(self):
+        sha = self.git("rev-parse", "HEAD")
+        bots = {verify.CODEX_BOT}
+
+        def verdicts(comment):
+            records, _ = verify.codex_github_reviews(self.repo, [comment], bots, "HEAD", None)
+            return [r["verdict"] for r in records]
+
+        self.assertEqual(verdicts(self.codex_comment(sha, unresolved=None, any_findings=False)), ["ship"])
+        self.assertEqual(verdicts(self.codex_comment(sha, unresolved=None, any_findings=None)), ["fix-first"])
+        self.assertEqual(verdicts(self.codex_comment(sha, unresolved=True, any_findings=True)), ["fix-first"])
+        self.assertEqual(verdicts(self.codex_comment(sha, status="failed", unresolved=False)), [None])
+        self.assertEqual(verdicts(self.codex_comment(sha, raw_state="{not json")), [])
+        records, notes = verify.codex_github_reviews(self.repo, [self.codex_comment("f" * 40)], bots, "HEAD", None)
+        self.assertIsNone(records[0]["content"])
+        self.assertIn("commit not available here", notes[0])
 
 
 class AskPeerContextTest(unittest.TestCase):
