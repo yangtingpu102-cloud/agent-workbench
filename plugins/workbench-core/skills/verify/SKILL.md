@@ -15,9 +15,12 @@ Evidence is tied to a content id: the git tree of the repo without `.ai/`, excep
 4. Commit `.ai/verifications/`. Changing only files under `.ai/` keeps the evidence valid.
 5. Confirm: `python <skill-dir>/scripts/verify.py gate --base main`. CI runs the same gate on pull requests.
 
+No second agent installed here? Push the branch, open the pull request and comment `@codex review`. CI's gate also accepts Codex's finished GitHub review of the same content when it has no unresolved findings (`gate --github-pr <number>`). If it has findings, fix them, push, and comment again.
+
 ## Rules
 - Never edit evidence files by hand, and never claim a check passed without a run that shows it.
 - The latest run and the latest independent review decide: an older pass does not outweigh a newer failure or `fix-first`.
 - If the gate finds no evidence for the content, the code or checks changed after the run: repeat steps 2 and 3.
-- The author of a change cannot supply its `ship` review: the gate accepts only reviews where the peer differs from the author.
+- The author of a change cannot supply its `ship` review: the gate accepts only reviews where the peer differs from the author. Codex counts as the author when it appears in the commits' author or `Co-authored-by`.
+- A GitHub review counts only when it comes from the Codex integration's bot account, is finished, and covers content identical to the PR's. Never copy or edit review records to make the gate pass.
 - Evidence records what was checked; it is not a security control.

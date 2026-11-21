@@ -3,9 +3,12 @@ name: validate
 on:
   push:
   pull_request:
+  pull_request_review:
+    types: [submitted]  # Codex's GitHub review arrives as a review: re-evaluate the gate when it does
 
 jobs:
   validate:
+    if: github.event_name != 'pull_request_review'
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
@@ -27,8 +30,14 @@ jobs:
         run: python plugins/workbench-core/skills/cross-review/scripts/ask_peer.py --peer codex --question "smoke test" --dry-run
 
   gate:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review'
     runs-on: ubuntu-latest
+    permissions:  # read-only: the gate reads the pull request's comments and never writes
+      contents: read
+      pull-requests: read
+      issues: read
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,10 +46,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Evidence gate (latest run passed, ship review by the other agent covering the PR)
-        run: python plugins/workbench-core/skills/verify/scripts/verify.py gate --base ${{ github.event.pull_request.base.sha }}
+      - name: Evidence gate (latest run passed; ship review by the other agent, committed or from Codex on GitHub)
+        run: >
+          python plugins/workbench-core/skills/verify/scripts/verify.py gate
+          --base ${{ github.event.pull_request.base.sha }}
+          --github-pr ${{ github.event.pull_request.number }}
 
   claude-validate:
+    if: github.event_name != 'pull_request_review'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

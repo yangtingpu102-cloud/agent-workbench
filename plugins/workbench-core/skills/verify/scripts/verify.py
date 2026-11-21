@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -276,6 +277,78 @@ def check_run(evidence: dict, required: list[tuple[str, str]]) -> str | None:
     return None
 
 
+CODEX_BOT = "chatgpt-codex-connector[bot]"
+# Codex's GitHub integration keeps a machine-readable state in its PR summary comment.
+CODEX_STATE_RE = re.compile(r"<!--\s*codex-review-state:v1\s+(\{.*?\})\s*-->", re.S)
+CODEX_DONE = {"completed", "complete", "done", "finished", "succeeded", "success"}
+
+
+def fetch_pr_comments(repo: str, pr: int) -> list[dict]:
+    """Issue comments on a pull request through the gh CLI (GH_TOKEN in CI). Tests replace this."""
+    jq = ".[] | {id, login: .user.login, type: .user.type, body, created_at, updated_at, html_url} | @json"
+    try:
+        r = subprocess.run(["gh", "api", "--paginate", f"repos/{repo}/issues/{pr}/comments", "--jq", jq],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        raise VerifyError("--github-pr needs the gh CLI")
+    if r.returncode != 0:
+        raise VerifyError(f"could not read the comments of {repo}#{pr}: {r.stderr.strip()[:300]}")
+    return [json.loads(line) for line in r.stdout.splitlines() if line.strip()]
+
+
+def change_authors(top: Path, base: str | None, rev: str) -> set[str]:
+    """Agents credited in the commits since the base: a Claude co-author trailer, or Codex in the author or a
+    trailer. Used so that Codex cannot supply the independent review of its own change."""
+    merge_base = git(top, "merge-base", base, rev, check=False) if base else ""
+    if not merge_base:
+        return set()
+    log = git(top, "log", "--format=%an <%ae>%x00%B%x1e", f"{merge_base}..{rev}", check=False)
+    authors = set()
+    for entry in log.split("\x1e"):
+        who, _, body = entry.partition("\x00")
+        if re.search(r"^co-authored-by:.*claude", body, re.I | re.M):
+            authors.add("claude")
+        if re.search(r"codex", who, re.I) or re.search(r"^co-authored-by:.*codex", body, re.I | re.M):
+            authors.add("codex")
+    return authors
+
+
+def codex_github_reviews(top: Path, comments: list[dict], bots: set[str], rev: str,
+                         base: str | None) -> tuple[list[dict], list[str]]:
+    """Codex's review state on the pull request, as review records the gate already understands. A GitHub
+    review covers the whole pull request, so its coverage starts at the merge base."""
+    authors = change_authors(top, base, rev)
+    author = "codex" if "codex" in authors else (",".join(sorted(authors)) or "unknown")
+    merge_base = git(top, "merge-base", base, rev, check=False) if base else None
+    records, notes = [], []
+    for comment in comments:
+        if comment.get("login") not in bots or comment.get("type") != "Bot":
+            continue  # only the integration's own account can speak for Codex
+        match = CODEX_STATE_RE.search(comment.get("body") or "")
+        if not match:
+            continue
+        try:
+            state = json.loads(match.group(1)).get("code_review") or {}
+        except (ValueError, AttributeError):
+            continue
+        sha, status = state.get("commit_sha"), str(state.get("status") or "").lower()
+        if status not in CODEX_DONE:
+            verdict = None
+        elif state.get("has_unresolved_findings") is False or (
+                state.get("has_unresolved_findings") is None and state.get("has_any_findings") is False):
+            verdict = "ship"
+        else:
+            verdict = "fix-first"
+        content = content_id(top, sha) if isinstance(sha, str) and has_commit(top, sha) else None
+        notes.append(f"Codex on GitHub: {status or 'unknown status'} for {str(sha)[:10]}"
+                     + (f", {verdict}" if verdict else "") + ("" if content else " (commit not available here)"))
+        records.append({"id": f"github-{comment.get('id')}-{sha}", "at": comment.get("updated_at") or comment.get("created_at"),
+                        "peer": "codex", "author": author, "content": content, "verdict": verdict,
+                        "complete": True, "base_sha": merge_base, "source": "github", "status": status,
+                        "url": comment.get("html_url")})
+    return records, notes
+
+
 def check_review(top: Path, reviews: list[dict], cid: str, rev: str, base: str | None) -> str | None:
     """The latest complete-or-not review by an agent other than the author decides: it must say ship, must have
     seen every change, and with --base must cover the whole change since the base."""
@@ -286,9 +359,13 @@ def check_review(top: Path, reviews: list[dict], cid: str, rev: str, base: str |
         found = [f"{r.get('verdict')} by {r.get('peer')} for {r.get('author')}" for r in reviews]
         return ("no review of this content by an agent other than its author"
                 + (f" (found: {', '.join(found)})" if found else "") + ". Run cross-review, then `verify.py collect`")
+    if review.get("source") == "github" and review.get("verdict") is None:
+        return (f"Codex's GitHub review of this content is {review.get('status') or 'not finished'}; "
+                "re-run this check once it completes")
     if review.get("verdict") != "ship":
         return (f"the latest independent review ({review.get('peer')} at {review.get('at')}) says "
-                f"{review.get('verdict')}. Fix the findings, review again until ship, then `verify.py collect`")
+                f"{review.get('verdict')}. Fix the findings, review again until ship, then `verify.py collect`"
+                + (" (or comment @codex review on the PR again)" if review.get("source") == "github" else ""))
     if review.get("complete") is not True:
         return (f"the latest independent review ({review.get('peer')} at {review.get('at')}) did not see every "
                 "change (truncated, or new files omitted). Review again with a larger --max-chars")
@@ -333,6 +410,16 @@ def cmd_gate(args) -> int:
             merge_reviews(pool, committed_reviews(top, rev, cid))
             if git(top, "rev-parse", rev, check=False) == git(top, "rev-parse", "HEAD", check=False):
                 merge_reviews(pool, matching_reviews(top, cid))  # local reviews nobody collected yet
+            if args.github_pr is not None:
+                repo = args.github_repo or os.environ.get("GITHUB_REPOSITORY")
+                if not repo:
+                    raise VerifyError("--github-pr needs --github-repo owner/name (CI sets GITHUB_REPOSITORY)")
+                bots = set(args.codex_bot or [CODEX_BOT])
+                records, notes = codex_github_reviews(top, fetch_pr_comments(repo, args.github_pr), bots, rev,
+                                                      args.base)
+                for note in notes:
+                    print(f"note  {note}")
+                merge_reviews(pool, records)
             problems.append(check_review(top, pool["reviews"], cid, rev, args.base))
     problems = [p for p in problems if p]
     for problem in problems:
@@ -375,6 +462,10 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--rev", help="commit to check (default: HEAD for gate, the working tree otherwise)")
         if name == "gate":
             p.add_argument("--base", help="the PR base: the ship review must cover every change since it")
+            p.add_argument("--github-pr", type=int, help="also accept Codex's review on this GitHub pull request")
+            p.add_argument("--github-repo", help="owner/name for --github-pr (default: $GITHUB_REPOSITORY)")
+            p.add_argument("--codex-bot", action="append",
+                           help=f"GitHub login of the Codex integration (default: {CODEX_BOT}); repeatable")
     return ap
 
 
