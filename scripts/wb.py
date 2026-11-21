@@ -7,15 +7,21 @@
   python scripts/wb.py lint [PATH]            audit a project's CLAUDE.md / AGENTS.md / skills token budget
   python scripts/wb.py link [--host H]        link skills into ~/.claude/skills and ~/.agents/skills
   python scripts/wb.py unlink [--host H]      remove only links that point into this repo
+  python scripts/wb.py parity                 compare Claude Code and Codex (shared rules, this repo's plugins); read-only
+  python scripts/wb.py sync --host H          show how a host's global rules differ from shared/ai-shared.md;
+                                              --apply writes only the marked block, after a backup
 
-Set WB_HOME to link into a directory other than your home (useful for testing).
+Set WB_HOME to use a directory other than your home (useful for testing).
 """
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import difflib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -41,7 +47,10 @@ def est_tokens(text: str) -> int:
 
 
 def rel(p: Path) -> str:
-    return p.relative_to(ROOT).as_posix()
+    try:
+        return p.relative_to(ROOT).as_posix()
+    except ValueError:  # outside the repository: show the full path
+        return str(p)
 
 
 def load_json(path: Path, errors: list[str]) -> dict | None:
@@ -541,6 +550,260 @@ def cmd_lint(args) -> int:
     return 1 if errors or over else 0
 
 
+# ---------- shared rules: sync / parity ----------
+
+SHARED_FILE = ROOT / "shared" / "ai-shared.md"
+START_MARK, END_MARK = "<!-- ai-shared:start -->", "<!-- ai-shared:end -->"
+DIFF_MAX_LINES = 120
+
+
+class SyncError(Exception):
+    pass
+
+
+def codex_home() -> Path:
+    env = os.environ.get("CODEX_HOME") if not os.environ.get("WB_HOME") else None
+    return Path(env) if env else link_home() / ".codex"
+
+
+def rule_file(host: str) -> Path:
+    return link_home() / ".claude" / "CLAUDE.md" if host == "claude" else codex_home() / "AGENTS.md"
+
+
+def read_text_nl(path: Path) -> tuple[str, str]:
+    """The file's text with LF newlines, and the newline style to write it back with."""
+    raw = path.read_bytes().decode("utf-8")
+    newline = "\r\n" if raw.count("\r\n") * 2 > raw.count("\n") else "\n"
+    return raw.replace("\r\n", "\n"), newline
+
+
+def canonical_rules() -> str:
+    if not SHARED_FILE.is_file():
+        raise SyncError(f"{rel(SHARED_FILE)} is missing")
+    text = SHARED_FILE.read_text(encoding="utf-8").replace("\r\n", "\n").strip("\n")
+    if not text or START_MARK in text or END_MARK in text:
+        raise SyncError(f"{rel(SHARED_FILE)} must be plain rules text without the ai-shared markers")
+    return text
+
+
+def render_block(rules: str) -> str:
+    return f"{START_MARK}\n{rules}\n{END_MARK}"
+
+
+def find_block(text: str) -> tuple[int, int] | None:
+    starts, ends = text.count(START_MARK), text.count(END_MARK)
+    if not starts and not ends:
+        return None
+    if starts != 1 or ends != 1 or text.index(START_MARK) > text.index(END_MARK):
+        raise SyncError("the ai-shared markers are unbalanced (exactly one start followed by one end is needed); "
+                        "fix the file by hand first")
+    return text.index(START_MARK), text.index(END_MARK) + len(END_MARK)
+
+
+def adopt_section(text: str, heading: str, block: str) -> str:
+    """Replace the section under `heading`, up to the next heading or @import line, with the block."""
+    lines = text.split("\n")
+    found = [i for i, line in enumerate(lines) if line.strip() == heading.strip()]
+    if len(found) != 1:
+        raise SyncError(f"the heading {heading!r} must appear exactly once (found {len(found)})")
+    start = found[0]
+    end = start + 1
+    while end < len(lines) and not lines[end].startswith(("#", "@")):
+        end += 1
+    tail = lines[end:]
+    return "\n".join(lines[:start] + block.split("\n") + ([""] if tail else []) + tail)
+
+
+def apply_rules(text: str, rules: str, adopt_heading: str | None, insert: bool) -> tuple[str, str]:
+    block = render_block(rules)
+    span = find_block(text)
+    if span:
+        return text[:span[0]] + block + text[span[1]:], "Only the marked ai-shared block changes."
+    if adopt_heading:
+        return adopt_section(text, adopt_heading, block), f"Only the section '{adopt_heading}' changes."
+    if insert:
+        return block + "\n\n" + text.lstrip("\n"), "Only a new block is added at the top."
+    raise SyncError("the file has no ai-shared block. Say how to add it: --adopt-heading '<existing heading>' "
+                    "replaces that section with the block, --insert adds the block at the top")
+
+
+def cmd_sync(args) -> int:
+    try:
+        rules = canonical_rules()
+        path = Path(args.file) if args.file else rule_file(args.host)
+        if not path.is_file():
+            raise SyncError(f"{path} does not exist")
+        old, newline = read_text_nl(path)
+        new, scope = apply_rules(old, rules, args.adopt_heading, args.insert)
+    except SyncError as e:
+        print(f"error: {e}")
+        return 2
+    if new == old:
+        print(f"{path}: already in sync with {rel(SHARED_FILE)}")
+        return 0
+    diff = list(difflib.unified_diff(old.split("\n"), new.split("\n"), f"{path} (now)", f"{path} (after sync)",
+                                     lineterm="", n=2))
+    print("\n".join(diff[:DIFF_MAX_LINES]))
+    if len(diff) > DIFF_MAX_LINES:
+        print(f"... {len(diff) - DIFF_MAX_LINES} more diff lines")
+    print(f"\n{scope}")
+    if not args.apply:
+        print("Dry run: nothing was written. Add --apply to write it; a backup is kept next to the file.")
+        return 1
+    backup = path.with_name(f"{path.name}.bak-{dt.datetime.now():%Y%m%d-%H%M%S}")
+    shutil.copy2(path, backup)
+    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temp.write_bytes(new.replace("\n", newline).encode("utf-8"))
+    os.replace(temp, path)
+    if read_text_nl(path)[0] != new:
+        print(f"error: the written file does not match what was planned; restore it from {backup}")
+        return 2
+    print(f"Written. Backup: {backup}")
+    return 0
+
+
+def rules_status(host: str, rules: str) -> tuple[str, bool]:
+    path = rule_file(host)
+    where = short(path)
+    if not path.is_file():
+        return f"{where}: file not found", True
+    try:
+        text, _ = read_text_nl(path)
+        span = find_block(text)
+    except SyncError as e:
+        return f"{where}: DIFFERS ({e})", True
+    if span is None:
+        return f"{where}: DIFFERS (no ai-shared block, so its own copy of the rules can drift)", True
+    if text[span[0]:span[1]] != render_block(rules):
+        return f"{where}: DIFFERS (the block is not the shared text)", True
+    return f"{where}: in sync", False
+
+
+def toml_enabled_plugins(path: Path) -> dict[str, bool]:
+    """`[plugins."name@market"]` tables and their `enabled` flag, read line by line (no TOML library needed)."""
+    found: dict[str, bool] = {}
+    current = None
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        text = line.strip()
+        header = re.match(r"""^\[plugins\.(?:"([^"]+)"|'([^']+)')\]$""", text)
+        if header:
+            current = header.group(1) or header.group(2)
+            found.setdefault(current, False)
+        elif text.startswith("["):
+            current = None
+        elif current and re.match(r"^enabled\s*=\s*true\b", text):
+            found[current] = True
+    return found
+
+
+def plugin_copy_info(enabled: bool, where: str, copy: Path | None, recorded: str | None = None) -> dict:
+    version, skills, hooks = recorded, [], False
+    if copy and copy.is_dir():
+        for manifest in (copy / ".claude-plugin" / "plugin.json", copy / ".codex-plugin" / "plugin.json"):
+            try:
+                version = json.loads(manifest.read_text(encoding="utf-8")).get("version") or version
+                break
+            except (OSError, ValueError):
+                continue
+        skills = sorted(p.name for p in (copy / "skills").glob("*") if (p / "SKILL.md").is_file())
+        hooks = (copy / "hooks").is_dir() and any((copy / "hooks").glob("*.json"))
+    return {"enabled": enabled, "where": where, "version": version, "skills": skills, "hooks": hooks}
+
+
+def read_json_file(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except ValueError:
+        return {}
+
+
+def host_plugin_state(host: str) -> dict[str, dict]:
+    """What a host loads for plugins: enabled flag, version and skills of the copy it actually uses."""
+    state: dict[str, dict] = {}
+    if host == "claude":
+        base = link_home() / ".claude"
+        enabled = read_json_file(base / "settings.json").get("enabledPlugins") or {}
+        registry = read_json_file(base / "plugins" / "installed_plugins.json")
+        installed = registry.get("plugins", registry)
+        markets = read_json_file(base / "plugins" / "known_marketplaces.json")
+        for key, on in enabled.items():
+            name, _, market = key.partition("@")
+            entries = installed.get(key) or []
+            entry = entries[-1] if isinstance(entries, list) and entries else {}
+            source = (markets.get(market) or {}).get("source") or {}
+            live = Path(source["path"]) / "plugins" / name if source.get("source") == "directory" and source.get("path") else None
+            if live and live.is_dir():  # a directory marketplace loads straight from the checkout
+                state[name] = plugin_copy_info(bool(on), "live from the checkout", live)
+            else:
+                install = Path(entry["installPath"]) if entry.get("installPath") else None
+                state[name] = plugin_copy_info(bool(on), "cached copy", install, entry.get("version"))
+        return state
+    config = codex_home() / "config.toml"
+    for key, on in (toml_enabled_plugins(config) if config.is_file() else {}).items():
+        name, _, market = key.partition("@")
+        cache = codex_home() / "plugins" / "cache" / market / name
+        versions = sorted((p for p in cache.glob("*") if p.is_dir()), key=lambda p: p.stat().st_mtime) if cache.is_dir() else []
+        state[name] = plugin_copy_info(on, "cached copy", versions[-1] if versions else None)
+    return state
+
+
+def repo_plugins() -> dict[str, dict]:
+    out = {}
+    for plugin in plugin_dirs():
+        info = plugin_copy_info(True, "repo", plugin)
+        out[plugin.name] = info
+    return out
+
+
+def cmd_parity(_args) -> int:
+    try:
+        rules = canonical_rules()
+    except SyncError as e:
+        print(f"error: {e}")
+        return 2
+    differs = 0
+    print(f"Shared rules ({rel(SHARED_FILE)})")
+    for host in ("claude", "codex"):
+        line, bad = rules_status(host, rules)
+        differs += bad
+        print(f"  {host:<6} {line}")
+    repo = repo_plugins()
+    states = {host: host_plugin_state(host) for host in ("claude", "codex")}
+    print("\nPlugins of this repo, as each host loads them")
+    for name, info in repo.items():
+        print(f"  {name} (repo {info['version']})")
+        for host in ("claude", "codex"):
+            s = states[host].get(name)
+            if not s:
+                differs += 1
+                print(f"    {host:<6} NOT INSTALLED")
+                continue
+            problems = []
+            if not s["enabled"]:
+                problems.append("disabled")
+            if s["version"] != info["version"]:
+                problems.append(f"version {s['version']}")
+            missing = sorted(set(info["skills"]) - set(s["skills"]))
+            if missing:
+                problems.append("missing skills: " + ", ".join(missing))
+            differs += bool(problems)
+            print(f"    {host:<6} {s['version']} ({s['where']}) " + ("DIFFERS: " + "; ".join(problems) if problems else "ok"))
+    hooked = [name for name, info in repo.items() if info["hooks"]]
+    if hooked:
+        print("\nHooks")
+        for name in hooked:
+            claude, codex = states["claude"].get(name), states["codex"].get(name)
+            c = "active (Claude runs an enabled plugin's hooks itself)" if claude and claude["enabled"] and claude["hooks"] \
+                else "not active"
+            x = ("hook files present, UNVERIFIED: Codex runs plugin hooks only after you trust them with /hooks"
+                 if codex and codex["hooks"] else "no hook files in the installed copy")
+            print(f"  {name}: claude {c}; codex {x}")
+    print("\nNot compared on purpose: plugins outside this repo (slides, documents, pdf, spreadsheets, ...), models and "
+          "effort, and the graphify and RTK sections of the rules files.")
+    print("\n" + ("DIFFERENCES FOUND" if differs else "in sync"))
+    return 1 if differs else 0
+
+
 # ---------- link / unlink ----------
 
 def link_home() -> Path:
@@ -628,13 +891,20 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("link", "unlink"):
         p = sub.add_parser(name)
         p.add_argument("--host", choices=["claude", "codex", "both"], default="both")
+    sub.add_parser("parity")
+    p = sub.add_parser("sync")
+    p.add_argument("--host", choices=["claude", "codex"], required=True)
+    p.add_argument("--file", help="target file instead of the host's global rules file")
+    p.add_argument("--apply", action="store_true", help="write the change; a backup is kept next to the file")
+    p.add_argument("--adopt-heading", help="replace the existing section under this heading with the block")
+    p.add_argument("--insert", action="store_true", help="add the block at the top of a file that has none")
     return ap
 
 
 def main() -> int:
     args = build_parser().parse_args()
     return {"new": cmd_new, "validate": cmd_validate, "budget": cmd_budget, "lint": cmd_lint,
-            "link": cmd_link, "unlink": cmd_unlink}[args.cmd](args)
+            "link": cmd_link, "unlink": cmd_unlink, "parity": cmd_parity, "sync": cmd_sync}[args.cmd](args)
 
 
 if __name__ == "__main__":

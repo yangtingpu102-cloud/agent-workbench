@@ -6,7 +6,8 @@ Skills and plugins that make Claude Code and Codex cheaper and smoother, and let
 - `plugins/<plugin>/skills/<skill>/SKILL.md`: skills in Agent Skills format, shared by Claude Code and Codex.
 - `plugins/<plugin>/.claude-plugin/plugin.json` and `.codex-plugin/plugin.json`: one manifest per host. Keep `name`, `version` and `description` identical.
 - `.claude-plugin/marketplace.json` and `.agents/plugins/marketplace.json`: list every plugin in both, with relative `./plugins/<name>` sources.
-- `scripts/wb.py`: `new`, `validate`, `budget`, `lint`, `link`, `unlink`. Stdlib Python only; tests in `tests/`.
+- `scripts/wb.py`: `new`, `validate`, `budget`, `lint`, `link`, `unlink`, `parity`, `sync`. Stdlib Python only; tests in `tests/`.
+- `shared/ai-shared.md`: the one source of the global working rules both hosts follow. Change it, then `sync` each host (see `docs/SYNC.md`). Slides and document tooling is Codex's: never compare, sync or write it.
 - `.ai/`: coordination state between agents (see Collaboration).
 
 ## Rules

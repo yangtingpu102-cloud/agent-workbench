@@ -8,6 +8,7 @@ Times are UTC. Once a lease time has passed, anyone may take the task.
 | T2 | Try `handoff` and `cross-review` in real Claude Code and Codex sessions | - | open | plugins/workbench-core/skills/ | - | Claude → Codex passed on 2026-10-16; Codex → Claude still to do |
 | T3 | Write `claude plugin eval` cases for both skills | - | open | plugins/workbench-core/evals/ | - | needs Claude Code 2.1.269 or later |
 | T6 | Opportunity #7: evidence-based cross-verification and a merge gate | - | review | plugins/workbench-core/, tests/test_verify.py, .github/workflows/, .ai/verify.json, docs/ | - | PR open; Codex ship after 6 review rounds; evidence in .ai/verifications/ |
+| T9 | Shared working rules, one source: `shared/ai-shared.md`, `wb.py parity`, `wb.py sync` | - | review | scripts/wb.py, tests/test_wb.py, shared/, docs/SYNC.md | - | PR open; the user has Codex sync its own side; slides and documents stay Codex's |
 
 ## Done
 | id | task | owner | finished | evidence |

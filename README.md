@@ -32,6 +32,8 @@ python scripts/wb.py link                   # try it in Claude Code and Codex
 python scripts/wb.py validate               # also: claude plugin validate . --strict
 python scripts/wb.py budget                 # always-loaded token cost of these plugins
 python scripts/wb.py lint [PATH]            # token budget of any project's CLAUDE.md, AGENTS.md and skills
+python scripts/wb.py parity                 # Claude Code vs Codex: shared rules, this repo's plugins (read-only)
+python scripts/wb.py sync --host codex      # how a host's global rules differ from shared/ai-shared.md (dry run)
 ```
 
 The full loop is in [docs/WORKFLOW.md](docs/WORKFLOW.md), and what to build next is in [docs/OPPORTUNITIES.md](docs/OPPORTUNITIES.md).
