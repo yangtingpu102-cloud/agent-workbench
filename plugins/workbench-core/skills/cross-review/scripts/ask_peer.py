@@ -165,10 +165,17 @@ def peer_command(peer: str, binary: str, model: str | None, out_file: str) -> li
             cmd += ["-m", model]
         return cmd + ["-"]  # prompt on stdin: avoids the Windows command-line length limit
     cmd = [binary, "-p", "--tools", "Read,Grep,Glob", "--permission-mode", "dontAsk",
-           "--no-session-persistence", "--output-format", "text"]
+           "--no-session-persistence", "--output-format", "text",
+           # A reviewer needs only read tools. Skipping MCP connectors, user settings and skills cut a
+           # measured headless call from ~162k to ~9k context tokens (workbench-bench headless-overhead).
+           "--strict-mcp-config", "--setting-sources", "project,local", "--disable-slash-commands"]
     if model:
         cmd += ["--model", model]
     return cmd
+
+
+def peer_env() -> dict:
+    return {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}  # let a Claude session call a nested Claude
 
 
 def content_id(root: Path) -> str | None:
@@ -270,7 +277,7 @@ def main() -> int:
             print(f"prompt: {len(prompt)} chars (about {len(prompt) // 4} tokens if mostly ASCII)")
             return 0
         try:
-            r = run(cmd, input=prompt, cwd=root, timeout=args.timeout)
+            r = run(cmd, input=prompt, cwd=root, timeout=args.timeout, env=peer_env())
         except subprocess.TimeoutExpired:
             print(f"{peer} timed out after {args.timeout}s.")
             return 1

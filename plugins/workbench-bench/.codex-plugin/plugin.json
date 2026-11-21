@@ -1,0 +1,31 @@
+{
+  "name": "workbench-bench",
+  "version": "0.1.0",
+  "description": "A/B benchmark for Claude Code and Codex: billed tokens, cost, turns and success per configuration, with confidence intervals.",
+  "author": {
+    "name": "wayne yan"
+  },
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Workbench Bench",
+    "shortDescription": "A/B test what a configuration really costs",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read"
+    ],
+    "developerName": "wayne yan",
+    "defaultPrompt": [
+      "Plan a benchmark of my instruction files",
+      "Does this hook save tokens?"
+    ]
+  },
+  "keywords": [
+    "benchmark",
+    "token-efficiency",
+    "cost",
+    "a/b-test",
+    "codex",
+    "claude-code"
+  ]
+}

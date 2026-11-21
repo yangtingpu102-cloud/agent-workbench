@@ -14,6 +14,11 @@
       "name": "workbench-lease",
       "source": "./plugins/workbench-lease",
       "description": "File leases for agents sharing a repo, enforced by PreToolUse hooks in Claude Code and Codex."
+    },
+    {
+      "name": "workbench-bench",
+      "source": "./plugins/workbench-bench",
+      "description": "A/B benchmark for Claude Code and Codex: billed tokens, cost, turns and success per configuration, with confidence intervals."
     }
   ]
 }

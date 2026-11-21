@@ -1,23 +1,22 @@
-# Handoff — 2026-10-22 05:15 UTC — claude:a1 on feat/verify-gate
+# Handoff — 2026-10-23 07:50 UTC — claude:a1 on feat/ab-bench
 ## Goal
-Ship opportunity #7: evidence records tied to exact content, and a merge gate that needs a passing run plus a full, independent ship review.
+Ship opportunity #1: workbench-bench, an A/B benchmark of billed cost, tokens, turns and success for Claude Code and Codex.
 ## State
-review: Codex said ship on round 6; evidence recorded; PR open against main.
+review: PR open. Every finding from 13 Codex review rounds is fixed; the user chose to stop reviewing, so the final content has no ship review and the CI evidence gate fails by design. The user decides whether to merge.
 ## Done
-- verify.py run/collect/gate/show/content; content id = git tree without .ai/ but with .ai/verify.json (evidence: 66 tests OK)
-- Gate: latest run passes the PR's checks and the current base's checks by name and command; latest independent review is ship, complete, and covers the change since the merge base (evidence: one test per Codex finding, 17 findings over 6 rounds)
-- cross-review writes JSON records (id, verdict, complete, base_sha = merge base, content id)
-- CI `gate` job runs `verify.py gate --base <PR base sha>` on pull requests
+- bench.py plan/run/report with validation of every input, safe arm-flag list, per-call Claude budget, interrupted-call markers, fingerprinted resume, paired bootstrap verdicts after 5 rounds (evidence: 115 tests OK; `verify.py run` passed on content dda16f369934)
+- Live smoke: Codex default vs --ignore-user-config (20,247 vs 14,729 input tokens), Claude isolated (9,405 tokens, $0.025); manual Claude default 162,644 tokens ($0.65)
+- cross-review's Claude reviewer runs isolated (no MCP, user settings or skills)
 ## Next
-1. Merge the PR when CI is green; from then on every PR needs committed evidence
-2. Opportunity #1: A/B token benchmark across Claude Code and Codex
-3. Board T2: Codex -> Claude cross-review from inside Codex (needs `claude` CLI re-login)
+1. User: decide on merging the PR despite the failing gate
+2. A real headless-overhead run with 5 rounds per arm and pinned Codex model, to replace the anecdotal readings in docs/benchmarks
+3. Board T2: Codex -> Claude cross-review from inside Codex
 ## Files
-- plugins/workbench-core/skills/verify/scripts/verify.py, plugins/workbench-core/skills/cross-review/scripts/ask_peer.py
-- .ai/verify.json: checks and require_review; .ai/verifications/: committed evidence
+- plugins/workbench-bench/skills/ab-bench/scripts/bench.py, tests/test_bench.py
+- docs/benchmarks/2026-10-22-headless-overhead.md
 ## Verify
-`python plugins/workbench-core/skills/verify/scripts/verify.py gate --base origin/main`
+`python -m unittest discover -s tests && python scripts/wb.py validate`
 ## Gotchas
-- Review against the remote base (`--base origin/main`) when local main has unpushed commits, or CI's coverage check fails.
-- `run` refuses a dirty tree; changes under .ai/ (except verify.json) never invalidate evidence.
-- Heredocs in this shell turn `\n` into real newlines; edit Python string escapes with the Edit tool.
+- Codex reviews found one new narrow issue per round; ask for an exhaustive list in one pass and do a systematic input audit before review.
+- An experiment file is code: its check runs on the host. Only run experiments you trust.
+- Heredocs in this shell turn \n into real newlines; use the Edit tool for Python string escapes.

@@ -1,0 +1,34 @@
+{
+  "name": "headless-overhead",
+  "description": "What a headless call costs before doing any work: the default setup versus one that skips MCP connectors, user settings and skills. Codex's --ignore-user-config may also change the model, which Codex does not report: pin it with \"-m\" in common.codex_args for a fair comparison.",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "runs": 3,
+  "task": {
+    "prompt": "Reply with the single word ok.",
+    "expect": "ok",
+    "expect_match": "exact",
+    "check": null,
+    "timeout": 300,
+    "claude_tools": ""
+  },
+  "arms": [
+    {
+      "name": "default"
+    },
+    {
+      "name": "isolated",
+      "claude_args": [
+        "--strict-mcp-config",
+        "--setting-sources",
+        "project,local",
+        "--disable-slash-commands"
+      ],
+      "codex_args": [
+        "--ignore-user-config"
+      ]
+    }
+  ]
+}
