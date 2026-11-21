@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import io
 import json
 import os
@@ -170,7 +171,7 @@ SLIDES = "- Slides and documents are made in Codex; its presentation setup is th
 
 
 class SyncTest(unittest.TestCase):
-    """`wb.py sync` writes only the marked block, never anything else, and never without --apply."""
+    """`wb.py sync` changes only the marked span, never writes without --apply, and never touches slides tooling."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -198,13 +199,22 @@ class SyncTest(unittest.TestCase):
         path = self.target(before, "\r\n")
         code, out = self.sync(path, "--apply")
         self.assertEqual(code, 0, out)
-        after = path.read_bytes().decode("utf-8")
-        self.assertNotIn("old rules", after)
-        self.assertIn("\r\n", after)
-        self.assertNotIn("\n", after.replace("\r\n", ""))  # no stray LF
-        expected = before.replace("old rules", RULES)
-        self.assertEqual(after, expected.replace("\n", "\r\n"))
-        self.assertIn(SLIDES.strip(), after)  # everything outside the block is untouched
+        self.assertEqual(path.read_bytes().decode("utf-8"), before.replace("old rules", RULES).replace("\n", "\r\n"))
+
+    def test_bytes_outside_the_block_never_change_even_with_mixed_line_endings(self):
+        head, tail = b"intro\r\nlf only\n", b"\r\ntail lf\ntail crlf\r\n"
+        path = self.base / "AGENTS.md"
+        path.write_bytes(head + f"{wb.START_MARK}\r\nold\r\n{wb.END_MARK}".encode() + tail)
+        self.assertEqual(self.sync(path, "--apply")[0], 0)
+        block = "\r\n".join([wb.START_MARK, *RULES.split("\n"), wb.END_MARK]).encode()
+        self.assertEqual(path.read_bytes(), head + block + tail)
+
+    def test_insert_keeps_the_original_file_exactly(self):
+        original = "\n\n# Mine\n\n- keep me  \n"
+        path = self.target(original)
+        self.assertEqual(self.sync(path, "--insert", "--apply")[0], 0)
+        block = "\n".join([wb.START_MARK, *RULES.split("\n"), wb.END_MARK])
+        self.assertEqual(path.read_text(encoding="utf-8"), block + "\n" + "\n" + original)  # original, byte for byte
 
     def test_dry_run_shows_the_diff_and_writes_nothing(self):
         path = self.target(f"{wb.START_MARK}\nold rules\n{wb.END_MARK}\n")
@@ -232,20 +242,69 @@ class SyncTest(unittest.TestCase):
         text = f"# Old defaults\n\n- a\n- b\n\n@RTK.md\n\n## Slides\n{SLIDES}"
         path = self.target(text)
         self.assertEqual(self.sync(path, "--adopt-heading", "# Old defaults", "--apply")[0], 0)
+        self.assertEqual(path.read_text(encoding="utf-8"),
+                         f"{wb.START_MARK}\n{RULES}\n{wb.END_MARK}\n\n@RTK.md\n\n## Slides\n{SLIDES}")
+
+    def test_adopt_stops_at_setext_and_indented_headings(self):
+        for name, nxt in (("setext", "Other section\n=============\n\n- keep me\n"), ("indented", "  ## Next\n- keep me\n")):
+            path = self.target(f"# Old\n\n- old one\n- old two\n\n{nxt}")
+            code, out = self.sync(path, "--adopt-heading", "# Old", "--apply")
+            self.assertEqual(code, 0, f"{name}: {out}")
+            after = path.read_text(encoding="utf-8")
+            self.assertTrue(after.endswith(nxt), name)
+            self.assertNotIn("old one", after, name)
+
+    def test_adopt_refuses_a_section_that_is_not_a_plain_bullet_list(self):
+        cases = {
+            "prose": "# Old\n\n- a\nsome paragraph text\n",
+            "code block": "# Old\n\n- a\n```\ncode\n```\n",
+            "table": "# Old\n\n| a | b |\n|---|---|\n",
+            "slides": "# Old\n\n- Make slides in Codex.\n",
+            "documents": "# Old\n\n- Keep the documents tidy.\n",
+            "pdf": "# Old\n\n- Export a PDF.\n",
+        }
+        for name, text in cases.items():
+            path = self.target(text)
+            original = path.read_bytes()
+            code, out = self.sync(path, "--adopt-heading", "# Old", "--apply")
+            self.assertEqual((code, path.read_bytes()), (2, original), name)
+        self.assertIn("belongs to Codex", self.sync(self.target(cases["slides"]), "--adopt-heading", "# Old")[1])
+        self.assertIn("not a plain bullet list", self.sync(self.target(cases["prose"]), "--adopt-heading", "# Old")[1])
+
+    def test_a_block_that_holds_slides_instructions_is_not_replaced(self):
+        path = self.target(f"{wb.START_MARK}\n- Make slides in Codex.\n{wb.END_MARK}\n")
+        original = path.read_bytes()
+        code, out = self.sync(path, "--apply")
+        self.assertEqual((code, path.read_bytes()), (2, original))
+        self.assertIn("belongs to Codex", out)
+
+    def test_marker_text_in_examples_is_not_a_marker(self):
+        example = (f"Docs example:\n```\n{wb.START_MARK}\nsample\n{wb.END_MARK}\n```\n"
+                   f"Inline: {wb.START_MARK} is the opening marker.\n")
+        path = self.target(example + f"{wb.START_MARK}\nold\n{wb.END_MARK}\n")
+        self.assertEqual(self.sync(path, "--apply")[0], 0)
         after = path.read_text(encoding="utf-8")
-        self.assertEqual(after, f"{wb.START_MARK}\n{RULES}\n{wb.END_MARK}\n\n@RTK.md\n\n## Slides\n{SLIDES}")
+        self.assertTrue(after.startswith(example))
+        self.assertIn(RULES, after)
+        only_examples = self.target(example)
+        code, out = self.sync(only_examples, "--apply")
+        self.assertEqual(code, 2)
+        self.assertIn("no ai-shared block", out)
 
     def test_a_file_without_a_block_needs_an_explicit_way_in(self):
         path = self.target("# Mine\n\n- keep me\n")
         original = path.read_bytes()
         code, out = self.sync(path, "--apply")
-        self.assertEqual(code, 2)
+        self.assertEqual((code, path.read_bytes()), (2, original))
         self.assertIn("--adopt-heading", out)
-        self.assertEqual(path.read_bytes(), original)
-        self.assertEqual(self.sync(path, "--insert", "--apply")[0], 0)
-        after = path.read_text(encoding="utf-8")
-        self.assertTrue(after.startswith(wb.START_MARK))
-        self.assertTrue(after.endswith("# Mine\n\n- keep me\n"))
+
+    def test_apply_with_a_file_only_writes_rules_files(self):
+        notes = self.base / "notes.txt"
+        notes.write_text(f"{wb.START_MARK}\nx\n{wb.END_MARK}\n", encoding="utf-8")
+        before = notes.read_bytes()
+        self.assertEqual(self.sync(notes, "--apply")[0], 2)
+        self.assertEqual(notes.read_bytes(), before)
+        self.assertEqual(self.sync(notes)[0], 1)  # a dry run only reads
 
     def test_bad_inputs_are_refused_without_touching_the_file(self):
         for bad in (f"{wb.START_MARK}\nx\n", f"{wb.END_MARK}\n{wb.START_MARK}\n",
@@ -254,16 +313,42 @@ class SyncTest(unittest.TestCase):
             code, out = self.sync(path, "--apply")
             self.assertEqual((code, path.read_bytes()), (2, bad.encode("utf-8")), bad)
             self.assertIn("unbalanced", out)
-        code, out = self.sync(self.base / "missing.md")
-        self.assertEqual(code, 2)
+        self.assertEqual(self.sync(self.base / "missing.md")[0], 2)
+        broken = self.base / "AGENTS.md"
+        broken.write_bytes(b"\xff\xfe not utf-8")
+        self.assertEqual(self.sync(broken, "--apply")[0], 2)
+        self.assertEqual(broken.read_bytes(), b"\xff\xfe not utf-8")
         self.shared.write_text(f"{wb.START_MARK}\nbad\n", encoding="utf-8")
         self.assertEqual(self.sync(self.target(f"{wb.START_MARK}\nx\n{wb.END_MARK}\n"))[0], 2)
+
+    def test_a_file_that_changed_since_it_was_read_is_not_overwritten(self):
+        path = self.base / "AGENTS.md"
+        path.write_bytes(b"A")
+        path.write_bytes(b"B")  # edited after the change was planned from "A"
+        with self.assertRaises(wb.SyncError):
+            wb.write_checked(path, b"A", b"C")
+        self.assertEqual(path.read_bytes(), b"B")
+        self.assertEqual([p.name for p in self.base.iterdir() if p.name.endswith(".tmp")], [])
+
+    def test_backups_in_the_same_instant_never_overwrite_each_other(self):
+        class Frozen(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return dt.datetime(2026, 1, 1, 0, 0, 0, 0)
+
+        path = self.base / "AGENTS.md"
+        path.write_bytes(b"x")
+        with mock.patch.object(wb.dt, "datetime", Frozen):
+            first, second = wb.make_backup(path, b"one"), wb.make_backup(path, b"two")
+        self.assertNotEqual(first, second)
+        self.assertEqual((first.read_bytes(), second.read_bytes()), (b"one", b"two"))
 
     def test_the_real_shared_file_is_plain_rules(self):
         with mock.patch.object(wb, "SHARED_FILE", Path(wb.__file__).resolve().parent.parent / "shared" / "ai-shared.md"):
             rules = wb.canonical_rules()
         self.assertGreaterEqual(rules.count("\n- "), 5)
         self.assertNotIn("ai-shared", rules)
+        self.assertIsNone(wb.PROTECTED_RE.search(rules))  # the shared text itself never talks about slides tooling
 
 
 class ParityTest(unittest.TestCase):
@@ -275,6 +360,7 @@ class ParityTest(unittest.TestCase):
         self.home = self.base / "home"
         self.repo = self.base / "repo"
         self.write(self.repo / "ai-shared.md", RULES + "\n")
+        self.write(self.repo / ".claude-plugin" / "marketplace.json", '{"name": "market"}')
         self.write_plugin(self.repo / "plugins" / "demo", "1.0.0", ["alpha", "beta"], hooks=True)
         env = {k: v for k, v in os.environ.items() if k != "CODEX_HOME"}
         env["WB_HOME"] = str(self.home)
@@ -324,6 +410,9 @@ class ParityTest(unittest.TestCase):
                    '[plugins."documents@openai-primary-runtime"]\nenabled = false\n')
         self.write_plugin(base / "plugins" / "cache" / "market" / "demo" / version, version, list(skills), hooks)
 
+    def codex_copy(self, version: str = "1.0.0") -> Path:
+        return self.home / ".codex" / "plugins" / "cache" / "market" / "demo" / version
+
     def parity(self) -> tuple[int, str]:
         return quiet(wb.cmd_parity, None)
 
@@ -365,11 +454,62 @@ class ParityTest(unittest.TestCase):
         self.codex(self.block(), version="0.5.0", skills=("alpha",))
         code, out = self.parity()
         self.assertEqual(code, 1)
-        self.assertIn("DIFFERS: version 0.9.0; missing skills: beta", out)
-        self.assertIn("DIFFERS: version 0.5.0; missing skills: beta", out)
+        self.assertIn("version 0.9.0", out)
+        self.assertIn("version 0.5.0", out)
+        self.assertEqual(out.count("skills/beta/SKILL.md (missing)"), 2)
         self.claude(self.block())  # now a directory marketplace: loaded live, so the stale cache does not matter
+        self.assertIn("claude 1.0.0 (live from the checkout) ok", self.parity()[1])
+
+    def test_changed_skill_content_differs_even_with_the_same_version_and_names(self):
+        self.claude(self.block())
+        self.codex(self.block())
+        (self.codex_copy() / "skills" / "alpha" / "SKILL.md").write_text("---\nname: x\n---\nstale body\n", encoding="utf-8")
         code, out = self.parity()
-        self.assertIn("claude 1.0.0 (live from the checkout) ok", out)
+        self.assertEqual(code, 1)
+        self.assertIn("skills/alpha/SKILL.md (changed)", out)
+
+    def test_extra_skills_and_missing_hooks_are_drift(self):
+        self.claude(self.block())
+        self.codex(self.block(), skills=("alpha", "beta", "gamma"), hooks=False)
+        code, out = self.parity()
+        self.assertEqual(code, 1)
+        self.assertIn("hooks/hooks.json (missing)", out)
+        self.assertIn("skills/gamma/SKILL.md (extra)", out)
+
+    def test_a_same_named_plugin_from_another_marketplace_does_not_count(self):
+        self.claude(self.block())
+        self.write(self.home / ".claude" / "settings.json", '{"enabledPlugins": {"demo@other": true}}')
+        self.codex(self.block())
+        code, out = self.parity()
+        self.assertEqual(code, 1)
+        self.assertIn("NOT INSTALLED from 'market'", out)
+
+    def test_the_newest_cached_version_is_chosen_by_number_not_by_time(self):
+        self.claude(self.block())
+        self.codex(self.block())
+        self.write_plugin(self.codex_copy("0.9.0"), "0.9.0", ["alpha"], False)
+        os.utime(self.codex_copy("0.9.0"), (4102444800, 4102444800))  # an older version with a far newer timestamp
+        code, out = self.parity()
+        self.assertEqual(code, 0, out)
+        self.assertIn("older cached copies: 0.9.0", out)
+
+    @unittest.skipIf(wb.tomllib is None, "reading Codex's config needs Python 3.11+")
+    def test_plugin_tables_inside_toml_strings_are_not_settings(self):
+        self.claude(self.block())
+        self.codex(self.block())
+        self.write(self.home / ".codex" / "config.toml", 'note = """\n[plugins."demo@market"]\nenabled = true\n"""\n')
+        code, out = self.parity()
+        self.assertEqual(code, 1)
+        self.assertIn("NOT INSTALLED", out)
+
+    @unittest.skipIf(wb.tomllib is None, "reading Codex's config needs Python 3.11+")
+    def test_a_config_that_is_not_toml_is_reported_not_guessed(self):
+        self.claude(self.block())
+        self.codex(self.block())
+        self.write(self.home / ".codex" / "config.toml", '[plugins."demo@market"\nenabled = true\n')
+        code, out = self.parity()
+        self.assertEqual(code, 1)
+        self.assertIn("CANNOT COMPARE", out)
 
     def test_missing_and_disabled_plugins_are_reported(self):
         self.claude(self.block())
